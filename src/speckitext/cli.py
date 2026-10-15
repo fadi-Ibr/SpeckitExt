@@ -102,14 +102,37 @@ def _graph(args) -> Graph:
     return Graph.build(Path(args.project))
 
 
+def _migration_block(args) -> dict | None:
+    """The one reusable incomplete-migration guard for project operations.
+
+    Wraps migration_block(): operations that depend on usable project
+    traceability state refuse while a migration transaction is incomplete
+    or corrupt. Migration diagnosis (--dry-run), --recover, --rollback and
+    read-only doctor inspection deliberately do not use this guard, so the
+    problem can always be investigated and resolved.
+    """
+    from .migration import migration_block
+    return migration_block(Path(args.project))
+
+
+def _reject_if_migration_blocked(args) -> int | None:
+    """Exit code 1 with an actionable diagnostic if blocked, else None."""
+    block = _migration_block(args)
+    if block is None:
+        return None
+    print(f"error: {block['detail']} Recovery: {block['recovery_command']} "
+          f"(diagnose with `speckitext migrate --project . --dry-run`)",
+          file=sys.stderr)
+    return 1
+
+
 def _print(data, as_json: bool) -> None:
     print(json.dumps(data, indent=2, sort_keys=True) if as_json else data
           if isinstance(data, str) else json.dumps(data, indent=2, sort_keys=True))
 
 
 def cmd_validate(args) -> int:
-    from .migration import migration_block
-    block = migration_block(Path(args.project))
+    block = _migration_block(args)
     if block:
         _print({"project": str(args.project), "valid": False,
                 "migration_state": block, "diagnostics": []}, True)
@@ -132,12 +155,9 @@ def cmd_validate(args) -> int:
 
 
 def cmd_compile(args) -> int:
-    from .migration import migration_block
-    block = migration_block(Path(args.project))
-    if block:
-        print(f"error: {block['detail']} Recovery: {block['recovery_command']}",
-              file=sys.stderr)
-        return 1
+    blocked = _reject_if_migration_blocked(args)
+    if blocked is not None:
+        return blocked
     graph = _graph(args)
     ids = [x.strip() for x in args.tasks.split(",") if x.strip()]
     try:
@@ -156,6 +176,9 @@ def cmd_compile(args) -> int:
 
 
 def cmd_batch(args) -> int:
+    blocked = _reject_if_migration_blocked(args)
+    if blocked is not None:
+        return blocked
     graph = _graph(args)
     diags = validate_all(graph)
     if not is_valid(diags):
@@ -168,6 +191,9 @@ def cmd_batch(args) -> int:
 
 
 def cmd_impact(args) -> int:
+    blocked = _reject_if_migration_blocked(args)
+    if blocked is not None:
+        return blocked
     graph = _graph(args)
     if args.files:
         result = impact_for_files(graph, Path(args.project),
@@ -182,6 +208,9 @@ def cmd_impact(args) -> int:
 
 
 def cmd_expand(args) -> int:
+    blocked = _reject_if_migration_blocked(args)
+    if blocked is not None:
+        return blocked
     graph = _graph(args)
     ids = [x.strip() for x in args.ids.split(",") if x.strip()]
     try:

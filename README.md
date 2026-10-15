@@ -150,8 +150,28 @@ until the migrated graph validates:
 ```bash
 speckitext migrate --project . --dry-run    # inventory, proposed diff, findings; writes nothing
 speckitext migrate --project . --apply      # staged, validated, journaled activation
+speckitext migrate --project . --recover    # restore an interrupted migration to its originals
 speckitext migrate --project . --rollback   # restore the activated transaction's backups
 ```
+
+While a migration transaction is incomplete (interrupted activation, an
+interrupted rollback, or corrupt transaction evidence), `validate`,
+`compile`, `batch suggest`, `expand`, and `impact` all refuse with a
+recovery-required diagnostic and write no generated output; `--dry-run`,
+`--recover`, `--rollback`, and `doctor` stay available for diagnosis and
+resolution. Recovery preflights the whole transaction before touching any
+file: each destination must still match its original or staged hash,
+otherwise recovery reports a **recovery conflict**, preserves every file
+(including edits made after the interruption), and waits for explicit
+resolution — restore the conflicted file to its original/staged content
+(or from the transaction `backup/`) and re-run `--recover`. Rollback
+likewise preflights journal, backups, and destination state before
+restoring, tracks progress so an interrupted rollback can be resumed by
+`--rollback` or completed by `--recover`, and reports `rolled-back` only
+after every restored file verifies against its original hash. A
+successful recovery means every affected file is byte-identical to its
+pre-migration original; a successful rollback means the same for the
+activated transaction.
 
 Relationships are derived only from textual evidence; anything ambiguous is a
 blocking finding, never an invented link. See
@@ -200,5 +220,5 @@ testing.**
 
 - **Package freshness** is checked against the context resolved from the *current* graph (selection, dependency closure, applicable GLOBAL/SCOPED/CONDITIONAL governance, traceability/contract/verification closure, source fingerprints, compiler/schema versions, approved expansions) plus the package's own content fingerprint. A new applicable rule or changed relationship invalidates old packages; malformed/incompatible packages make `speckitext validate --package` exit nonzero.
 - **Expansion** (`speckitext expand`) re-renders through the canonical compiler, records deduplicated reasons, never adds tasks as executable work, and refuses stale/corrupt packages.
-- **Migration** is a durable transaction (prepared -> staged -> activating -> activated; `--recover` restores byte-exact originals after interruption; rollback refuses to overwrite post-activation edits unless `--force-rollback`). Incomplete migrations block validate/compile. Pending tasks must be implementation-ready; completed tasks remain historical traceability.
+- **Migration** is a durable transaction (prepared -> staged -> activating -> activated; rollback passes through rolling-back; `--recover` restores byte-exact originals after interruption). Recovery never overwrites a destination that matches neither its original nor staged hash — that is a recovery conflict requiring explicit resolution. Rollback preflights backups and destination state, refuses post-activation edits unless `--force-rollback`, and reports success only after verified restoration. Incomplete migrations block validate/compile/batch/expand/impact. Pending tasks must be implementation-ready; completed tasks remain historical traceability.
 - **Bootstrap** refuses existing nonempty non-Spec-Kit directories by default, never uses `--force` on init, stops at the first failed mandatory step, and reports `partial` (nonzero exit) unless every requested integration has a verified scoped override. Doctor requires *every recorded* integration to be active and only calls tested-compatible Spec Kit versions verified.

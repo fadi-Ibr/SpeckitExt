@@ -4,7 +4,8 @@ Durable transaction state machine (journal schema 2):
 
     prepared -> staged -> activating -> activated
     any non-terminal state --recover()--> recovered
-    activated --rollback()--> rolled-back
+    activated --rollback()--> rolling-back -> rolled-back
+    interrupted rolling-back --recover()/rollback()--> rolled-back
     in-process activation failure -> failed (originals already restored)
 
 Transaction layout (kept separate from authored content):
@@ -21,10 +22,19 @@ recoverable logical atomicity: recovery evidence (backups + hashed journal)
 is persisted and fsynced before any project file is replaced, the journal is
 advanced after every replacement, and an interruption that lands between a
 replacement and its journal update is reconciled on recovery by comparing
-current file hashes against the backup/staged manifest. A project with a
-non-terminal transaction is blocked from use until `recover()` restores the
-byte-exact originals. Rollback refuses to overwrite files edited after
-activation unless an explicit forced resolution is requested.
+current file hashes against the backup/staged manifest. Recovery preflights
+the whole transaction before touching any destination: a destination that
+matches neither its original nor its staged hash is a recovery conflict,
+is preserved untouched, and must be resolved explicitly (restore the file
+to its original or staged content, or restore from backup/ manually).
+A project with a non-terminal transaction is blocked from use until
+`recover()` restores the byte-exact originals. Rollback follows the same
+preflight -> restore -> verify -> finalize contract: it refuses missing
+or corrupt backups and files edited after activation unless an explicit
+forced resolution is requested, records progress under the rolling-back
+state (so an interrupted rollback can be resumed by rollback() or
+completed by recover()), and only reports rolled-back after every
+restored file verifies against its original hash.
 """
 from __future__ import annotations
 
@@ -45,7 +55,8 @@ from .validate import is_valid, validate_all, validate_graph
 STATE_DIR = ".speckitext/migrations"
 JOURNAL_SCHEMA = 2
 TERMINAL_STATES = ("activated", "rolled-back", "recovered", "failed")
-INCOMPLETE_STATES = ("prepared", "staged", "activating", "recovery-required")
+INCOMPLETE_STATES = ("prepared", "staged", "activating", "recovery-required",
+                     "rolling-back")
 
 # ID-less headings in these files gain deterministic IDs of the mapped kind.
 _HEADING_ID_ROLES = {
@@ -313,7 +324,20 @@ class Migration:
                 journal["completed"].append(rel)
                 self._write_journal(root, journal)
         except OSError as exc:
-            self._restore(root, journal)
+            try:
+                self._restore(root, journal)
+                unrestored = [r["path"] for r in journal["file_records"]
+                              if not (self.project / r["path"]).is_file()
+                              or _sha(self.project / r["path"]) != r["backup_sha256"]]
+            except OSError:
+                unrestored = list(journal["files"])
+            if unrestored:
+                journal["state"] = "recovery-required"
+                journal["detail"] = (f"activation failed ({exc}) and originals "
+                                     f"could not be fully restored for: {unrestored}")
+                self._write_journal(root, journal)
+                return {"status": "recovery-required", "txn": txn_id,
+                        "detail": journal["detail"]}
             journal["state"] = "failed"
             journal["detail"] = f"activation failed, restored: {exc}"
             self._write_journal(root, journal)
@@ -329,13 +353,17 @@ class Migration:
         Idempotent: terminal transactions are left alone, and running
         recovery when nothing is incomplete is a no-op. Works from a fresh
         process; reconciles replacements whose journal update never landed
-        by trusting file hashes, not the completed list.
+        by trusting file hashes, not the completed list. The whole
+        transaction is preflighted before any destination is touched:
+        every destination must currently match its original or its staged
+        hash, otherwise recovery reports a conflict and preserves all
+        files (including post-interruption user edits) untouched.
         """
         base = self.project / STATE_DIR
         if not base.is_dir():
             return {"status": "nothing-to-recover",
                     "detail": "no migration transactions found"}
-        recovered, blocked = [], []
+        recovered, blocked, conflicts, plans = [], [], [], []
         for root in sorted(p for p in base.glob("*") if p.is_dir()):
             journal_path = root / "journal.json"
             try:
@@ -348,14 +376,50 @@ class Migration:
                 continue
             if journal.get("state") in TERMINAL_STATES:
                 continue
-            problem = self._verify_backups(root, journal)
+            problem = self._verify_backups(root, journal, check_staged=True)
             if problem:
                 journal["state"] = "recovery-required"
                 journal["detail"] = problem
                 self._write_journal(root, journal)
                 blocked.append({"txn": journal.get("txn", root.name), "reason": problem})
                 continue
-            self._restore(root, journal)
+            found = self._destination_conflicts(journal)
+            if found:
+                conflicts.extend(found)
+                blocked.append({"txn": journal.get("txn", root.name),
+                                "reason": "recovery conflict: destination content "
+                                          "matches neither the original nor the "
+                                          "staged transaction state",
+                                "conflicts": found})
+                continue
+            plans.append((root, journal))
+        if conflicts:
+            return {"status": "recovery-conflict", "recovered": [],
+                    "blocked": blocked, "conflicts": conflicts,
+                    "detail": "recovery refused: files changed after the "
+                              "interrupted migration do not match the "
+                              "transaction; no files were modified. Preserve "
+                              "the edits, or restore each conflicted file to "
+                              "its original/staged content (or from the "
+                              "transaction backup/), then re-run "
+                              "`speckitext migrate --project . --recover`",
+                    "recovery_command": "speckitext migrate --project . --recover"}
+        if blocked:
+            return {"status": "recovery-required", "recovered": [],
+                    "blocked": blocked,
+                    "detail": "some transactions cannot be recovered automatically; "
+                              "no partially migrated state may be used"}
+        for root, journal in plans:
+            was_rollback = journal.get("state") == "rolling-back"
+            try:
+                self._restore(root, journal, progress_key="recovery_completed")
+            except OSError as exc:
+                journal["state"] = "recovery-required"
+                journal["detail"] = f"recovery interrupted during restoration: {exc}"
+                self._write_journal(root, journal)
+                blocked.append({"txn": journal.get("txn", root.name),
+                                "reason": journal["detail"]})
+                continue
             bad = [r["path"] for r in journal.get("file_records", [])
                    if not (self.project / r["path"]).is_file()
                    or _sha(self.project / r["path"]) != r["backup_sha256"]]
@@ -366,8 +430,10 @@ class Migration:
                 blocked.append({"txn": journal.get("txn", root.name),
                                 "reason": journal["detail"]})
                 continue
-            journal["state"] = "recovered"
-            journal["detail"] = "interrupted migration restored to byte-exact originals"
+            journal["state"] = "rolled-back" if was_rollback else "recovered"
+            journal["detail"] = ("interrupted rollback completed by recovery: "
+                                 "restored byte-exact originals" if was_rollback else
+                                 "interrupted migration restored to byte-exact originals")
             self._write_journal(root, journal)
             recovered.append(journal.get("txn", root.name))
         if blocked:
@@ -381,7 +447,34 @@ class Migration:
         return {"status": "nothing-to-recover",
                 "detail": "no incomplete migration transactions"}
 
-    def _verify_backups(self, root: Path, journal: dict) -> str | None:
+    def _manifest_problem(self, journal: dict) -> str | None:
+        """Journal schema/manifest inconsistency, or None if verifiable."""
+        if journal.get("schema_version") != JOURNAL_SCHEMA:
+            return (f"journal schema_version {journal.get('schema_version')!r} is "
+                    f"not supported (expected {JOURNAL_SCHEMA}); recovery evidence "
+                    "cannot be verified safely")
+        files, records = journal.get("files"), journal.get("file_records")
+        if not isinstance(files, list) or not isinstance(records, list) \
+                or not all(isinstance(f, str) for f in files) \
+                or not all(isinstance(r, dict) for r in records):
+            return "journal file manifest is missing or malformed; cannot verify safely"
+        if len(set(files)) != len(files) or \
+                sorted(r.get("path", "") for r in records if isinstance(r, dict)) != sorted(files) \
+                or len(records) != len(files):
+            return ("journal file manifest does not match its hashed file records; "
+                    "cannot verify safely")
+        for record in records:
+            if not isinstance(record, dict) or not record.get("backup_sha256") \
+                    or not record.get("staged_sha256"):
+                return (f"journal record for {record.get('path') if isinstance(record, dict) else '?'} "
+                        "lacks recorded hashes; cannot verify safely")
+        return None
+
+    def _verify_backups(self, root: Path, journal: dict,
+                        check_staged: bool = False) -> str | None:
+        problem = self._manifest_problem(journal)
+        if problem:
+            return problem
         for record in journal.get("file_records", []):
             backup = root / "backup" / record["path"]
             if not backup.is_file():
@@ -389,14 +482,55 @@ class Migration:
             if _sha(backup) != record.get("backup_sha256"):
                 return (f"backup for {record['path']} does not match its journal "
                         "hash; cannot recover safely")
-        if not journal.get("file_records"):
-            for rel in journal.get("files", []):
-                if not (root / "backup" / rel).is_file():
-                    return f"backup missing for {rel}; cannot recover safely"
+            if check_staged:
+                staged = root / "staged" / record["path"]
+                if not staged.is_file():
+                    return f"staged copy missing for {record['path']}; cannot recover safely"
+                if _sha(staged) != record.get("staged_sha256"):
+                    return (f"staged copy for {record['path']} does not match its "
+                            "journal hash; cannot recover safely")
         return None
+
+    def _destination_conflicts(self, journal: dict,
+                               staged_only: bool = False) -> list[dict]:
+        """Destinations matching no expected transaction state.
+
+        Expected states are the original (backup) hash and, unless
+        staged_only is set (a fresh rollback expects the activated --
+        staged -- content), the staged hash. A file already restored
+        during an interrupted rollback therefore still preflights.
+        """
+        conflicts = []
+        for record in journal.get("file_records", []):
+            dest = self.project / record["path"]
+            observed = _sha(dest) if dest.is_file() else None
+            expected = [{"state": "staged", "sha256": record["staged_sha256"]}]
+            if not staged_only:
+                expected.append({"state": "original",
+                                 "sha256": record["backup_sha256"]})
+            if observed not in [e["sha256"] for e in expected]:
+                conflicts.append({
+                    "path": record["path"], "observed_sha256": observed,
+                    "expected": expected,
+                    "reason": "destination is missing" if observed is None else
+                              "destination content matches no expected "
+                              "transaction state (post-interruption edit?)"})
+        return conflicts
 
     # ---- rollback -----------------------------------------------------------
     def rollback(self, txn_id: str | None = None, force: bool = False) -> dict:
+        """Preflight -> restore -> verify -> finalize rollback.
+
+        Nothing is restored unless the journal schema/manifest verifies,
+        every backup exists and matches its recorded original hash, and
+        every destination is in its expected activated (staged) state --
+        or, when resuming an interrupted rollback, its original state.
+        `force` is the explicit, intentional resolution for destination
+        conflicts only; it never bypasses backup integrity. Rolled-back
+        is reported only after every destination verifies against its
+        original hash; an interruption leaves the transaction in the
+        non-terminal rolling-back state for recover()/rollback() resume.
+        """
         base = self.project / STATE_DIR
         if txn_id is None:
             candidates = sorted(p for p in base.glob("*") if p.is_dir()) if base.is_dir() else []
@@ -407,7 +541,7 @@ class Migration:
                         encoding="utf-8")).get("state")
                 except (OSError, ValueError):
                     continue
-                if state == "activated":
+                if state in ("activated", "rolling-back"):
                     activated.append(p)
             if not activated:
                 return {"status": "nothing-to-rollback", "detail": "no activated transaction found"}
@@ -419,19 +553,24 @@ class Migration:
         except (OSError, ValueError) as exc:
             return {"status": "rollback-refused",
                     "detail": f"cannot read transaction journal: {exc}"}
-        if journal["state"] != "activated":
+        if journal.get("state") not in ("activated", "rolling-back"):
             return {"status": "nothing-to-rollback",
-                    "detail": f"transaction {journal['txn']} is {journal['state']}, not activated"}
+                    "detail": f"transaction {journal.get('txn', root.name)} is "
+                              f"{journal.get('state')}, not activated"}
+        # Preflight: missing/corrupt/inconsistent evidence refuses before
+        # any destination is touched. Legacy journals without verifiable
+        # hashes are refused, never treated as proof of safety.
+        problem = self._verify_backups(root, journal)
+        if problem:
+            return {"status": "rollback-refused", "txn": journal.get("txn", root.name),
+                    "detail": f"rollback refused before restoration: {problem}"}
         # Never silently overwrite work done after activation.
-        conflicts = []
-        for record in journal.get("file_records", []):
-            dest = self.project / record["path"]
-            current = _sha(dest) if dest.is_file() else None
-            if current != record.get("staged_sha256"):
-                conflicts.append({"path": record["path"],
-                                  "reason": "file changed after migration activation"})
-        if not journal.get("file_records"):
-            conflicts = []  # legacy journal without hashes: nothing to verify
+        resuming = journal["state"] == "rolling-back"
+        conflicts = self._destination_conflicts(journal, staged_only=not resuming)
+        for conflict in conflicts:
+            conflict["reason"] = ("file changed after migration activation"
+                                  if conflict["observed_sha256"] is not None
+                                  else "destination is missing")
         if conflicts and not force:
             return {"status": "rollback-conflict", "txn": journal["txn"],
                     "conflicts": conflicts,
@@ -439,22 +578,64 @@ class Migration:
                               "destroy those edits. Preserve or revert them "
                               "explicitly, or re-run rollback with the explicit "
                               "forced resolution."}
-        self._restore(root, journal)
+        journal["state"] = "rolling-back"
+        if not resuming:
+            journal["rollback_completed"] = []
+        self._write_journal(root, journal)
+        try:
+            self._restore(root, journal, progress_key="rollback_completed")
+        except OSError as exc:
+            journal["state"] = "rolling-back"
+            journal["detail"] = (f"rollback interrupted: {exc}; re-run rollback "
+                                 "or `speckitext migrate --project . --recover`")
+            self._write_journal(root, journal)
+            return {"status": "recovery-required", "txn": journal["txn"],
+                    "detail": journal["detail"],
+                    "rollback_completed": list(journal.get("rollback_completed", []))}
+        unrestored = [r["path"] for r in journal.get("file_records", [])
+                      if not (self.project / r["path"]).is_file()
+                      or _sha(self.project / r["path"]) != r["backup_sha256"]]
+        if unrestored:
+            journal["state"] = "rolling-back"
+            journal["detail"] = (f"rollback did not reproduce originals for: "
+                                 f"{unrestored}; re-run rollback or recover")
+            self._write_journal(root, journal)
+            return {"status": "recovery-required", "txn": journal["txn"],
+                    "detail": journal["detail"], "unrestored": unrestored}
         journal["state"] = "rolled-back"
+        journal["detail"] = "rollback verified: every file restored to its original hash"
         self._write_journal(root, journal)
         return {"status": "rolled-back", "txn": journal["txn"],
                 "files": journal["files"], "forced": bool(force and conflicts)}
 
     # ---- helpers ----------------------------------------------------------
-    def _restore(self, root: Path, journal: dict) -> None:
+    def _restore(self, root: Path, journal: dict,
+                 progress_key: str | None = None) -> None:
+        """Restore every manifest file from its backup via safe replacement.
+
+        Raises OSError (including FileNotFoundError for a missing backup)
+        instead of silently skipping a file; callers preflight backups and
+        verify destinations afterwards. With progress_key, each restored
+        file is journaled before the next begins, so an interruption is
+        resumable from the recorded progress.
+        """
         for rel in journal["files"]:
             backup = root / "backup" / rel
             dest = self.project / rel
-            if backup.is_file():
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                tmp = dest.with_name(dest.name + ".speckitext-tmp")
-                shutil.copyfile(backup, tmp)
-                os.replace(tmp, dest)
+            if not backup.is_file():
+                raise FileNotFoundError(
+                    f"backup missing for {rel}; cannot restore safely")
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            tmp = dest.with_name(dest.name + ".speckitext-tmp")
+            shutil.copyfile(backup, tmp)
+            _fsync_file(tmp)
+            os.replace(tmp, dest)
+            _fsync_dir(dest.parent)
+            if progress_key:
+                done = journal.setdefault(progress_key, [])
+                if rel not in done:
+                    done.append(rel)
+                self._write_journal(root, journal)
 
     @staticmethod
     def _write_journal(root: Path, journal: dict) -> None:
