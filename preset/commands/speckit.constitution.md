@@ -8,6 +8,7 @@ After the core workflow below, ensure every principle/rule section carries a
 `<!-- speckitext ... -->` block with a stable `CON-xxx` ID, `kind: constitution`,
 and `applicability:` of GLOBAL, SCOPED (with `scope:` COMP-xxx list), or
 CONDITIONAL (with a deterministic `condition:`). Never renumber or reuse an ID.
-Finish by running `speckitext validate --project .` and fixing every diagnostic.
+Finish by enrolling new identities with `speckitext identity sync --project .`,
+then running `speckitext validate --project .` and fixing every diagnostic.
 
 {CORE_TEMPLATE}

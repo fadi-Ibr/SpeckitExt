@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 from pathlib import Path
 
@@ -112,6 +113,84 @@ def load_identity_map(project: Path) -> dict:
                 "entities": [], "corrupt": True,
                 "corrupt_reason": "identity map 'features' must be an object and 'entities' a list"}
     return data
+
+
+def identity_map_expected(project: Path) -> bool:
+    """True when an activated migration journal records an identity map for
+    this project, so a now-missing sidecar is lost provenance, not a fresh
+    unenrolled project. Malformed journals are migration-state problems
+    handled elsewhere; they prove nothing here."""
+    base = Path(project) / ".speckitext" / "migrations"
+    if not base.is_dir():
+        return False
+    for journal_path in sorted(base.glob("*/journal.json")):
+        try:
+            journal = json.loads(journal_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(journal, dict) or journal.get("state") != "activated":
+            continue
+        files = journal.get("files") or []
+        records = journal.get("file_records") or []
+        if IDENTITY_PATH in files or journal.get("identity_mapping") or \
+                any(isinstance(r, dict) and r.get("path") == IDENTITY_PATH for r in records):
+            return True
+    return False
+
+
+def serialize_identity_map(data: dict) -> str:
+    return json.dumps(data, indent=2, sort_keys=True) + "\n"
+
+
+def _fsync_file(path: Path) -> None:
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _fsync_dir(path: Path) -> None:
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def write_identity_map_atomic(project: Path, data: dict) -> bool:
+    """Atomically replace the identity sidecar; True when bytes changed.
+
+    Same write/fsync/replace/fsync-dir pattern as the migration journal:
+    a failure leaves the prior map byte-exact and no temp file behind."""
+    dest = Path(project) / IDENTITY_PATH
+    payload = serialize_identity_map(data).encode("utf-8")
+    if dest.is_file() and dest.read_bytes() == payload:
+        return False
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.name + ".tmp")
+    try:
+        tmp.write_bytes(payload)
+        _fsync_file(tmp)
+        os.replace(tmp, dest)
+        _fsync_dir(dest.parent)
+    except BaseException:
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    return True
 
 
 def feature_for_path(project: Path, rel_path: str, identity_map: dict | None = None) -> str:
@@ -225,7 +304,12 @@ def identity_map_diagnostics(identity_map, sections=(), project=None) -> list:
     def add(code, msg, nid=""):
         diags.append(Diagnostic(code, msg, nid, IDENTITY_PATH))
     if project is not None and not (Path(project) / IDENTITY_PATH).is_file():
-        return []
+        if identity_map_expected(Path(project)):
+            add("IDENTITY_MAP_MISSING",
+                "an activated migration recorded an identity map for this project but "
+                f"{IDENTITY_PATH} is missing; restore it from the migration journal/backup "
+                "instead of recreating provenance from current documents")
+        return diags
     if identity_map is None:
         return []
     if not isinstance(identity_map, dict):
@@ -317,10 +401,13 @@ def identity_map_diagnostics(identity_map, sections=(), project=None) -> list:
     # an explicit, auditable reconciliation (its entity record is retained
     # for provenance); disappearance without one fails closed. A new
     # authored identity is never guessed to be a replacement.
+    # Single reconciliation syntax at one validation strength (see
+    # docs/identity-lifecycle.md). Entity-record markers such as
+    # retired/replaced_by carry no authority on their own.
     rec_by_canon: dict = {}
     rec_replacement_owner: dict = {}
-    _actions = {"removed": "removed", "retired": "removed", "deleted": "removed",
-                "reassigned": "reassigned", "renamed": "reassigned", "replaced": "reassigned"}
+    _REC_KEYS = {"canonical_id", "action", "replacement", "reason"}
+    _REC_ALIAS_KEYS = {"old_canonical_id", "new_canonical_id", "from", "to", "type", "replaced_by"}
     recs_raw = identity_map.get("reconciliations", [])
     if not isinstance(recs_raw, list):
         add("IDENTITY_RECONCILIATION_INVALID", "identity map 'reconciliations' must be a list of records")
@@ -329,17 +416,30 @@ def identity_map_diagnostics(identity_map, sections=(), project=None) -> list:
         if not isinstance(r, dict):
             add("IDENTITY_RECONCILIATION_INVALID", "reconciliation records must be objects")
             continue
-        rcanon = r.get("canonical_id") or r.get("old_canonical_id") or r.get("from") or ""
-        raction = _actions.get(str(r.get("action") or r.get("type") or "").strip().lower())
-        rrepl = r.get("replacement") or r.get("new_canonical_id") or r.get("replaced_by") or r.get("to") or ""
-        rreason = r.get("reason") or ""
-        if not isinstance(rcanon, str) or not rcanon or raction is None:
+        keys = set(r)
+        if keys & _REC_ALIAS_KEYS:
+            add("IDENTITY_RECONCILIATION_INVALID",
+                f"reconciliation uses legacy alias keys {sorted(keys & _REC_ALIAS_KEYS)}; rewrite it with exactly "
+                f"canonical_id/action/replacement/reason: {r!r}", str(r.get("canonical_id", "")))
+            continue
+        if keys - _REC_KEYS:
+            add("IDENTITY_RECONCILIATION_INVALID",
+                f"reconciliation has unknown keys {sorted(keys - _REC_KEYS)}; allowed keys are "
+                f"canonical_id/action/replacement/reason: {r!r}", str(r.get("canonical_id", "")))
+            continue
+        rcanon, raction = r.get("canonical_id"), r.get("action")
+        rrepl, rreason = r.get("replacement", ""), r.get("reason", "")
+        if not isinstance(rcanon, str) or not rcanon or raction not in ("removed", "reassigned"):
             add("IDENTITY_RECONCILIATION_INVALID",
                 f"reconciliation must name canonical_id and action removed|reassigned: {r!r}", str(rcanon))
             continue
         if not isinstance(rreason, str) or not rreason.strip():
             add("IDENTITY_RECONCILIATION_INVALID",
                 f"reconciliation for {rcanon!r} must record an auditable reason", rcanon)
+            continue
+        if raction == "removed" and rrepl:
+            add("IDENTITY_RECONCILIATION_INVALID",
+                f"removed reconciliation for {rcanon!r} must not name a replacement (use reassigned for a rename)", rcanon)
             continue
         if raction == "reassigned" and (not isinstance(rrepl, str) or not rrepl):
             add("IDENTITY_RECONCILIATION_INVALID",
@@ -364,39 +464,59 @@ def identity_map_diagnostics(identity_map, sections=(), project=None) -> list:
                 continue
             rec_replacement_owner[rrepl] = rcanon
         rec_by_canon[rcanon] = {"action": raction, "replacement": rrepl, "reason": rreason}
-    # Entity-level retirement markers are an equivalent explicit record.
+    # Reassignment cycles are conflicts even before authored-state checks.
+    _edges = {c: r["replacement"] for c, r in rec_by_canon.items() if r["action"] == "reassigned"}
+    _reported_cycles: set = set()
+    for _start in sorted(_edges):
+        _seen, _cur = [], _start
+        while _cur in _edges and _cur not in _seen:
+            _seen.append(_cur); _cur = _edges[_cur]
+        if _cur in _seen:
+            _cyc = frozenset(_seen[_seen.index(_cur):])
+            if _cyc not in _reported_cycles:
+                _reported_cycles.add(_cyc)
+                add("IDENTITY_RECONCILIATION_CONFLICT",
+                    f"reassignment cycle among {', '.join(sorted(_cyc))}; "
+                    "point each retired identity directly at its authored replacement", _cur)
+    # Continuity is evaluated against the full authored set, empty included:
+    # an established project that lost its artifacts reports every identity.
     for e in valid_entities:
         canon = e["canonical_id"]
-        replaced_by = e.get("replaced_by") or ""
-        retired = e.get("retired") is True or \
-            str(e.get("status", "")).strip().lower() in ("removed", "retired") or bool(replaced_by)
-        if retired and canon not in rec_by_canon:
-            rec_by_canon[canon] = {"action": "reassigned" if replaced_by else "removed",
-                                   "replacement": replaced_by, "reason": "entity retirement marker"}
-    if secs:
-        for e in valid_entities:
-            canon = e["canonical_id"]
-            if canon in by_canon:
-                if canon in rec_by_canon:
-                    add("IDENTITY_RECONCILIATION_CONFLICT",
-                        f"persisted identity {canon!r} is still authored but carries a "
-                        f"{rec_by_canon[canon]['action']} reconciliation", canon)
-                continue
-            rec = rec_by_canon.get(canon)
-            if rec is None:
-                add("IDENTITY_DISAPPEARED",
-                    f"persisted identity {canon!r} (kind {e['kind']!r}, feature {e['feature']!r}) is no longer authored "
-                    "and has no reconciliation; an identity rename/removal must be recorded explicitly in the identity "
-                    "map 'reconciliations' (action removed, or reassigned with its replacement), keeping this entity "
-                    "record for provenance. No replacement is inferred from similar text or position", canon)
-            elif rec["action"] == "reassigned":
-                repl_sec = by_canon.get(rec["replacement"])
-                if repl_sec is None:
-                    add("IDENTITY_RECONCILIATION_INVALID",
-                        f"reassignment of {canon!r} names replacement {rec['replacement']!r} which is not authored", canon)
-                elif getattr(repl_sec, "kind", "") != e["kind"]:
-                    add("IDENTITY_RECONCILIATION_CONFLICT",
-                        f"reassignment of {canon!r} (kind {e['kind']!r}) names {rec['replacement']!r} of kind {getattr(repl_sec, 'kind', '')!r}", canon)
+        if canon in by_canon:
+            if canon in rec_by_canon:
+                add("IDENTITY_RECONCILIATION_CONFLICT",
+                    f"persisted identity {canon!r} is still authored but carries a "
+                    f"{rec_by_canon[canon]['action']} reconciliation; reuse of a retired identity "
+                    "requires removing its reconciliation deliberately", canon)
+            continue
+        rec = rec_by_canon.get(canon)
+        if rec is None:
+            add("IDENTITY_DISAPPEARED",
+                f"persisted identity {canon!r} (kind {e['kind']!r}, feature {e['feature']!r}) is no longer authored "
+                "and has no reconciliation; an identity rename/removal must be recorded explicitly in the identity "
+                "map 'reconciliations' (action removed, or reassigned with its replacement), keeping this entity "
+                "record for provenance. No replacement is inferred from similar text or position", canon)
+        elif rec["action"] == "reassigned":
+            repl_sec = by_canon.get(rec["replacement"])
+            if repl_sec is None and rec["replacement"] in rec_by_canon:
+                add("IDENTITY_RECONCILIATION_CONFLICT",
+                    f"reassignment of {canon!r} names retired identity {rec['replacement']!r}; chains are not followed, "
+                    "point directly at the currently authored replacement", canon)
+            elif repl_sec is None:
+                add("IDENTITY_RECONCILIATION_INVALID",
+                    f"reassignment of {canon!r} names replacement {rec['replacement']!r} which is not authored", canon)
+            elif getattr(repl_sec, "kind", "") != e["kind"]:
+                add("IDENTITY_RECONCILIATION_CONFLICT",
+                    f"reassignment of {canon!r} (kind {e['kind']!r}) names {rec['replacement']!r} of kind {getattr(repl_sec, 'kind', '')!r}", canon)
+    # Authored but not yet enrolled: visible, non-blocking, enrollable via sync.
+    _map_present = bool(project is not None and (Path(project) / IDENTITY_PATH).is_file()) or bool(valid_entities)
+    if _map_present:
+        for canon in sorted(set(by_canon) - set(seen_canon)):
+            _sec = by_canon[canon]
+            diags.append(Diagnostic("IDENTITY_UNENROLLED",
+                f"authored identity {canon!r} is not yet enrolled in the identity map and is not "
+                "continuity-protected; run `speckitext identity sync --project .` at the authoring checkpoint",
+                canon, getattr(_sec, "path", IDENTITY_PATH), severity="warning"))
     return sorted(diags, key=lambda x: (x.code, x.node_id, x.path))
 
 
@@ -434,3 +554,84 @@ def section_identity_diagnostics(sec, identity_map=None) -> list:
     if meta_local and meta_local != local:
         add("CANONICAL_LOCAL_MISMATCH", f"local_id metadata {meta_local!r} does not match local ID {local!r}")
     return diags
+
+
+def build_synced_map(identity_map, sections):
+    """(candidate_map, enrolled_canonicals, refreshed_canonicals).
+
+    Pure: enrolls authored identities missing from the map, refreshes the
+    mutable source/status snapshot of enrolled ones, preserves retired
+    records and reconciliations verbatim, and never deletes anything."""
+    old_entities = identity_map.get("entities") if isinstance(identity_map, dict) else []
+    by_canon = {e["canonical_id"]: dict(e) for e in (old_entities or [])
+                if isinstance(e, dict) and isinstance(e.get("canonical_id"), str)}
+    features = dict(identity_map.get("features") or {}) if isinstance(identity_map, dict) else {}
+    enrolled: list[str] = []
+    refreshed: list[str] = []
+    for sec in sorted(sections, key=lambda s: s.node_id):
+        record = {"canonical_id": sec.node_id, "local_id": sec.local_id,
+                  "legacy_alias": sec.legacy_alias, "feature": sec.feature_id,
+                  "kind": sec.kind, "source_path": sec.path,
+                  "source_lines": [sec.start_line, sec.end_line], "status": sec.status}
+        existing = by_canon.get(sec.node_id)
+        if existing is None:
+            by_canon[sec.node_id] = record
+            enrolled.append(sec.node_id)
+        else:
+            changed = False
+            for field in ("source_path", "source_lines", "status"):
+                if existing.get(field) != record[field]:
+                    existing[field] = record[field]
+                    changed = True
+            if changed:
+                refreshed.append(sec.node_id)
+        dirf = feature_from_path(sec.path)
+        if dirf and dirf not in features and sec.feature_id and not is_global_feature(sec.feature_id):
+            features[dirf] = sec.feature_id
+    candidate = {"version": IDENTITY_VERSION, "schema_version": "2.0",
+                 "features": dict(sorted(features.items())),
+                 "entities": [by_canon[c] for c in sorted(by_canon)],
+                 "reconciliations": list(identity_map.get("reconciliations") or [])
+                 if isinstance(identity_map, dict) else []}
+    return candidate, sorted(enrolled), sorted(refreshed)
+
+
+def sync_identity_map(project, graph, dry_run: bool = False) -> dict:
+    """Enrollment synchronization: the one post-migration mutation of the
+    identity sidecar. Refuses (writing nothing) on any identity error --
+    corrupt/missing-expected map, unexplained disappearance, duplicates,
+    canonical-ownership conflicts -- so enrollment can never launder a
+    deletion or invent replacements. Deterministic and idempotent."""
+    project = Path(project)
+    old = load_identity_map(project)
+    sections = list(graph.nodes.values())
+    diags = identity_map_diagnostics(old, sections, project)
+    for sec in sections:
+        diags.extend(section_identity_diagnostics(sec, old))
+    for dup in getattr(graph, "duplicates", []) or []:
+        diags.append(Diagnostic("DUPLICATE_ID",
+                                "duplicate canonical identifier (same feature+local identity)",
+                                dup.node_id, dup.path))
+    payload_diags = [d.to_dict() for d in sorted(diags, key=lambda x: (x.code, x.node_id, x.path))]
+    if any(d.severity == "error" for d in diags):
+        return {"status": "refused", "enrolled": [], "refreshed": [],
+                "diagnostics": payload_diags}
+    candidate, enrolled, refreshed = build_synced_map(old, sections)
+    cand_errors = [d for d in identity_map_diagnostics(candidate, sections, None)
+                   if d.severity == "error"]
+    if cand_errors:
+        return {"status": "refused", "enrolled": [], "refreshed": [],
+                "diagnostics": [d.to_dict() for d in cand_errors]}
+    created = not (project / IDENTITY_PATH).is_file()
+    if dry_run:
+        return {"status": "dry-run", "enrolled": enrolled, "refreshed": refreshed,
+                "would_create": created, "diagnostics": payload_diags}
+    try:
+        written = write_identity_map_atomic(project, candidate)
+    except OSError as exc:
+        return {"status": "failed", "enrolled": [], "refreshed": [],
+                "error": f"identity map write failed; prior map left intact: {exc}",
+                "diagnostics": payload_diags}
+    status = "created" if created and written else ("enrolled" if written else "noop")
+    return {"status": status, "enrolled": enrolled, "refreshed": refreshed,
+            "diagnostics": payload_diags}

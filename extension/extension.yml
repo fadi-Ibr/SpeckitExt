@@ -35,6 +35,9 @@ provides:
     - name: "speckit.traceability.migrate"
       file: "commands/speckit.traceability.migrate.md"
       description: "Full all-or-nothing migration of a legacy Spec Kit project"
+    - name: "speckit.traceability.identity"
+      file: "commands/speckit.traceability.identity.md"
+      description: "Enroll new authored identities into the persisted identity map"
 
 hooks:
   after_tasks:

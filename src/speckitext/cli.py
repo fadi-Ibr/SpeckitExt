@@ -1,4 +1,4 @@
-"""speckitext CLI: validate | compile | batch suggest | impact | expand | migrate."""
+"""speckitext CLI: validate | compile | batch suggest | impact | expand | migrate | identity sync."""
 from __future__ import annotations
 
 import argparse
@@ -230,6 +230,17 @@ def cmd_expand(args) -> int:
     return 0
 
 
+def cmd_identity(args) -> int:
+    from .identity import sync_identity_map
+    blocked = _reject_if_migration_blocked(args)
+    if blocked is not None:
+        return blocked
+    result = sync_identity_map(Path(args.project), _graph(args),
+                               dry_run=getattr(args, "dry_run", False))
+    _print(result, True)
+    return 0 if result["status"] in ("enrolled", "created", "noop", "dry-run") else 1
+
+
 def cmd_migrate(args) -> int:
     mig = Migration(Path(args.project))
     if args.dry_run:
@@ -308,6 +319,14 @@ def build_parser() -> argparse.ArgumentParser:
     mg.add_argument("--txn", help="transaction id for rollback")
     mg.add_argument("--fail-after", type=int, help=argparse.SUPPRESS)
     mg.set_defaults(fn=cmd_migrate)
+
+    idp = sub.add_parser("identity", help="identity-map lifecycle")
+    idsub = idp.add_subparsers(dest="identity_command", required=True)
+    ids = idsub.add_parser("sync", help="enroll new authored identities into .speckitext/identity.json "
+                                        "(refuses unexplained disappearances; never rewrites history)")
+    ids.add_argument("--project", required=True)
+    ids.add_argument("--dry-run", action="store_true", help="report pending enrollment without writing")
+    ids.set_defaults(fn=cmd_identity)
 
     doc = sub.add_parser("doctor", help="compatibility and registration diagnosis")
     doc.add_argument("--json", action="store_true")

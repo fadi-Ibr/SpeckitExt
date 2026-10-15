@@ -47,7 +47,13 @@ otherwise modifies the user's Spec Kit installation.
   in `reconciliations` (`removed`, or `reassigned` with a `replacement`,
   plus a `reason`) while retaining the old entity record. The field is
   additive within identity-map version 1; maps without it keep working,
-  and migration carries reconciliations forward transactionally.
+  and migration carries reconciliations forward transactionally. New
+  entities enroll via `speckitext identity sync` (also run by the
+  authoring preset gates); see docs/identity-lifecycle.md for the full
+  state-transition contract, including empty-graph and missing-map
+  behavior. The one intentional tightening: undocumented reconciliation
+  alias keys briefly accepted before were never written by any tool and
+  are now rejected in favor of the single documented syntax.
 - Governance references (`SCOPED` scope entries and `CONDITIONAL`
   `component == ...` / `has_component(...)`, qualified forms supported)
   share one resolution contract: they must name exactly one existing

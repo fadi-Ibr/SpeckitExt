@@ -49,7 +49,8 @@ from .fingerprint import fingerprint_bytes
 from .graph import Graph
 from .identity import (IDENTITY_PATH, IDENTITY_VERSION, feature_from_path,
                        generated_local_id, identity_map_diagnostics,
-                       load_identity_map, make_canonical, split_canonical)
+                       load_identity_map, make_canonical, serialize_identity_map,
+                       split_canonical)
 from .parsing import (checklist_line_flags, document_role, extract_task_local,
                       is_task_bearing, parse_text)
 from .project import discover_files
@@ -212,13 +213,18 @@ class Migration:
         # Fail-closed identity preflight: a corrupt/inconsistent persisted
         # mapping blocks activation before any authored file is touched.
         findings: list[dict] = []
+        _old_map = load_identity_map(self.project)
         _existing_secs = []
         for _rel, _text in texts.items():
-            _existing_secs.extend(parse_text(_text, _rel).sections)
-        _old_map = load_identity_map(self.project)
+            # Parse with the persisted map so relocated features keep their
+            # stable identities in the continuity preflight.
+            _existing_secs.extend(parse_text(_text, _rel, identity_map=_old_map).sections)
         for _diag in identity_map_diagnostics(_old_map, _existing_secs, self.project):
-            findings.append({"id": _diag.node_id, "path": _diag.path,
-                             "finding": f"identity map integrity ({_diag.code}): {_diag.message}"})
+            # Warnings (e.g. unenrolled new entities) do not block: migration
+            # is itself an enrollment path. Errors fail closed.
+            if _diag.severity == "error":
+                findings.append({"id": _diag.node_id, "path": _diag.path,
+                                 "finding": f"identity map integrity ({_diag.code}): {_diag.message}"})
         inventory, transforms = [], {}
         for p in files:
             rel = p.resolve().relative_to(self.project.resolve()).as_posix()
@@ -311,8 +317,7 @@ class Migration:
         # forward verbatim; migration never drops or invents them. An
         # unreconciled disappearance already failed the preflight above.
         _old_recs = _old_map.get("reconciliations") if isinstance(_old_map.get("reconciliations"), list) else []
-        _rec_canons = {(r.get("canonical_id") or r.get("old_canonical_id") or r.get("from"))
-                       for r in _old_recs if isinstance(r, dict)}
+        _rec_canons = {r.get("canonical_id") for r in _old_recs if isinstance(r, dict)}
         _staged_canons = {e["canonical_id"] for e in entities}
         for _old_e in (_old_map.get("entities") or []):
             if isinstance(_old_e, dict) and _old_e.get("canonical_id") in _rec_canons \
@@ -388,8 +393,7 @@ class Migration:
         # Identity sidecar participates in staging/backup/activation/rollback.
         _id_staged = root / "staged" / IDENTITY_PATH
         _id_staged.parent.mkdir(parents=True, exist_ok=True)
-        _id_staged.write_text(json.dumps(plan.get("identity_mapping") or {},
-                                         indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        _id_staged.write_bytes(serialize_identity_map(plan.get("identity_mapping") or {}).encode("utf-8"))
         _fsync_file(_id_staged)
         _id_dest = self.project / IDENTITY_PATH
         if _id_dest.is_file():

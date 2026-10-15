@@ -33,9 +33,13 @@ Rules:
   Deterministic validation rejects omissions, placeholders, and vague
   verification; it cannot prove semantic quality — review for that.
 
-VALIDATION GATE: after writing tasks.md, run `speckitext validate --project .`
-(which includes readiness checks; `--graph-only` skips them). Do not report
-the task list as complete while any diagnostic remains; fix links and task
-bodies, never invent placeholder IDs.
+VALIDATION GATE: after writing tasks.md, first enroll the new task
+identities with `speckitext identity sync --project .` (it refuses
+unexplained identity disappearances — renames/removals of enrolled tasks
+need an explicit reconciliation in `.speckitext/identity.json`, never a
+silent edit), then run `speckitext validate --project .` (which includes
+readiness checks; `--graph-only` skips them). Do not report the task list
+as complete while any diagnostic remains; fix links and task bodies,
+never invent placeholder IDs.
 
 {CORE_TEMPLATE}
