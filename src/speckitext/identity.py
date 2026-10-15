@@ -102,6 +102,11 @@ def load_identity_map(project: Path) -> dict:
     data.setdefault("version", IDENTITY_VERSION)
     data.setdefault("features", {})
     data.setdefault("entities", [])
+    data.setdefault("reconciliations", [])
+    if not isinstance(data.get("reconciliations"), list):
+        return {"version": data.get("version", IDENTITY_VERSION), "features": {},
+                "entities": [], "corrupt": True,
+                "corrupt_reason": "identity map 'reconciliations' must be a list"}
     if not isinstance(data.get("features"), dict) or not isinstance(data.get("entities"), list):
         return {"version": data.get("version", IDENTITY_VERSION), "features": {},
                 "entities": [], "corrupt": True,
@@ -209,7 +214,13 @@ def identity_map_diagnostics(identity_map, sections=(), project=None) -> list:
     No map (file absent) is valid for a fresh project. A present map must be
     well-typed, version-supported, internally consistent, and in agreement
     with authored canonical metadata for entities present in both. Source
-    line/path differences alone are not inconsistencies (relocation)."""
+    line/path differences alone are not inconsistencies (relocation). The
+    map is also the continuity record: a persisted identity that is no
+    longer authored needs an explicit ``reconciliations`` record
+    (removed, or reassigned to a named replacement, with a reason) or it
+    is reported as IDENTITY_DISAPPEARED. New authored identities are fine
+    and are never guessed to be replacements. Validation is read-only:
+    it never deletes or rewrites mappings."""
     diags: list = []
     def add(code, msg, nid=""):
         diags.append(Diagnostic(code, msg, nid, IDENTITY_PATH))
@@ -301,6 +312,91 @@ def identity_map_diagnostics(identity_map, sections=(), project=None) -> list:
             # Authored alias for an ID-less (T-AUTO) entity is empty; otherwise alias must be preserved exactly.
             if not getattr(s, "id_missing", False):
                 add("IDENTITY_MAP_INCONSISTENT", f"persisted legacy alias {e.get('legacy_alias')!r} for {e['canonical_id']!r} disagrees with authored alias {getattr(s, 'legacy_alias', '')!r}", e["canonical_id"])
+    # Continuity: the persisted map is the authoritative record of migrated
+    # identities. A persisted identity that is no longer authored must carry
+    # an explicit, auditable reconciliation (its entity record is retained
+    # for provenance); disappearance without one fails closed. A new
+    # authored identity is never guessed to be a replacement.
+    rec_by_canon: dict = {}
+    rec_replacement_owner: dict = {}
+    _actions = {"removed": "removed", "retired": "removed", "deleted": "removed",
+                "reassigned": "reassigned", "renamed": "reassigned", "replaced": "reassigned"}
+    recs_raw = identity_map.get("reconciliations", [])
+    if not isinstance(recs_raw, list):
+        add("IDENTITY_RECONCILIATION_INVALID", "identity map 'reconciliations' must be a list of records")
+        recs_raw = []
+    for r in recs_raw:
+        if not isinstance(r, dict):
+            add("IDENTITY_RECONCILIATION_INVALID", "reconciliation records must be objects")
+            continue
+        rcanon = r.get("canonical_id") or r.get("old_canonical_id") or r.get("from") or ""
+        raction = _actions.get(str(r.get("action") or r.get("type") or "").strip().lower())
+        rrepl = r.get("replacement") or r.get("new_canonical_id") or r.get("replaced_by") or r.get("to") or ""
+        rreason = r.get("reason") or ""
+        if not isinstance(rcanon, str) or not rcanon or raction is None:
+            add("IDENTITY_RECONCILIATION_INVALID",
+                f"reconciliation must name canonical_id and action removed|reassigned: {r!r}", str(rcanon))
+            continue
+        if not isinstance(rreason, str) or not rreason.strip():
+            add("IDENTITY_RECONCILIATION_INVALID",
+                f"reconciliation for {rcanon!r} must record an auditable reason", rcanon)
+            continue
+        if raction == "reassigned" and (not isinstance(rrepl, str) or not rrepl):
+            add("IDENTITY_RECONCILIATION_INVALID",
+                f"reassigned reconciliation for {rcanon!r} must name its replacement canonical identity", rcanon)
+            continue
+        if rcanon not in seen_canon:
+            add("IDENTITY_RECONCILIATION_INVALID",
+                f"reconciliation names {rcanon!r} which is not a persisted identity; retain the entity record for provenance", rcanon)
+            continue
+        if rcanon in rec_by_canon:
+            add("IDENTITY_RECONCILIATION_CONFLICT",
+                f"conflicting reconciliations for persisted identity {rcanon!r}", rcanon)
+            continue
+        if raction == "reassigned":
+            if rrepl == rcanon:
+                add("IDENTITY_RECONCILIATION_CONFLICT",
+                    f"reconciliation for {rcanon!r} names itself as its replacement", rcanon)
+                continue
+            if rrepl in rec_replacement_owner:
+                add("IDENTITY_RECONCILIATION_CONFLICT",
+                    f"replacement {rrepl!r} is claimed by both {rec_replacement_owner[rrepl]!r} and {rcanon!r}", rcanon)
+                continue
+            rec_replacement_owner[rrepl] = rcanon
+        rec_by_canon[rcanon] = {"action": raction, "replacement": rrepl, "reason": rreason}
+    # Entity-level retirement markers are an equivalent explicit record.
+    for e in valid_entities:
+        canon = e["canonical_id"]
+        replaced_by = e.get("replaced_by") or ""
+        retired = e.get("retired") is True or \
+            str(e.get("status", "")).strip().lower() in ("removed", "retired") or bool(replaced_by)
+        if retired and canon not in rec_by_canon:
+            rec_by_canon[canon] = {"action": "reassigned" if replaced_by else "removed",
+                                   "replacement": replaced_by, "reason": "entity retirement marker"}
+    if secs:
+        for e in valid_entities:
+            canon = e["canonical_id"]
+            if canon in by_canon:
+                if canon in rec_by_canon:
+                    add("IDENTITY_RECONCILIATION_CONFLICT",
+                        f"persisted identity {canon!r} is still authored but carries a "
+                        f"{rec_by_canon[canon]['action']} reconciliation", canon)
+                continue
+            rec = rec_by_canon.get(canon)
+            if rec is None:
+                add("IDENTITY_DISAPPEARED",
+                    f"persisted identity {canon!r} (kind {e['kind']!r}, feature {e['feature']!r}) is no longer authored "
+                    "and has no reconciliation; an identity rename/removal must be recorded explicitly in the identity "
+                    "map 'reconciliations' (action removed, or reassigned with its replacement), keeping this entity "
+                    "record for provenance. No replacement is inferred from similar text or position", canon)
+            elif rec["action"] == "reassigned":
+                repl_sec = by_canon.get(rec["replacement"])
+                if repl_sec is None:
+                    add("IDENTITY_RECONCILIATION_INVALID",
+                        f"reassignment of {canon!r} names replacement {rec['replacement']!r} which is not authored", canon)
+                elif getattr(repl_sec, "kind", "") != e["kind"]:
+                    add("IDENTITY_RECONCILIATION_CONFLICT",
+                        f"reassignment of {canon!r} (kind {e['kind']!r}) names {rec['replacement']!r} of kind {getattr(repl_sec, 'kind', '')!r}", canon)
     return sorted(diags, key=lambda x: (x.code, x.node_id, x.path))
 
 

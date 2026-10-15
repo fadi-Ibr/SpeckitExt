@@ -50,7 +50,8 @@ from .graph import Graph
 from .identity import (IDENTITY_PATH, IDENTITY_VERSION, feature_from_path,
                        generated_local_id, identity_map_diagnostics,
                        load_identity_map, make_canonical, split_canonical)
-from .parsing import document_role, extract_task_local, is_task_bearing, parse_text
+from .parsing import (checklist_line_flags, document_role, extract_task_local,
+                      is_task_bearing, parse_text)
 from .project import discover_files
 from .schema import ID_TOKEN_RE, kind_for_id
 from .validate import is_valid, validate_all, validate_graph
@@ -214,7 +215,8 @@ class Migration:
         _existing_secs = []
         for _rel, _text in texts.items():
             _existing_secs.extend(parse_text(_text, _rel).sections)
-        for _diag in identity_map_diagnostics(load_identity_map(self.project), _existing_secs, self.project):
+        _old_map = load_identity_map(self.project)
+        for _diag in identity_map_diagnostics(_old_map, _existing_secs, self.project):
             findings.append({"id": _diag.node_id, "path": _diag.path,
                              "finding": f"identity map integrity ({_diag.code}): {_diag.message}"})
         inventory, transforms = [], {}
@@ -304,9 +306,23 @@ class Migration:
                              "finding": f"task inventory coverage mismatch: {total_occ} original "
                                         f"task occurrences vs {len(canonical_tasks)} canonical tasks; "
                                         f"migration must not lose or merge tasks"})
+        # Continuity provenance: reconciliations recorded against the old
+        # map (and the retired entity records they explain) are carried
+        # forward verbatim; migration never drops or invents them. An
+        # unreconciled disappearance already failed the preflight above.
+        _old_recs = _old_map.get("reconciliations") if isinstance(_old_map.get("reconciliations"), list) else []
+        _rec_canons = {(r.get("canonical_id") or r.get("old_canonical_id") or r.get("from"))
+                       for r in _old_recs if isinstance(r, dict)}
+        _staged_canons = {e["canonical_id"] for e in entities}
+        for _old_e in (_old_map.get("entities") or []):
+            if isinstance(_old_e, dict) and _old_e.get("canonical_id") in _rec_canons \
+                    and _old_e.get("canonical_id") not in _staged_canons:
+                entities.append(dict(_old_e))
+        entities.sort(key=lambda e: e.get("canonical_id", ""))
         identity_mapping = {"version": IDENTITY_VERSION, "schema_version": "2.0",
                             "features": dict(sorted(features.items())),
-                            "entities": entities}
+                            "entities": entities,
+                            "reconciliations": list(_old_recs)}
         return {"inventory": inventory, "findings": findings, "transforms": transforms,
                 "identity_mapping": identity_mapping,
                 "task_occurrences": total_occ,
@@ -818,13 +834,10 @@ def transform_text(text: str, rel: str, existing_ids: list[str],
         meta.append("-->")
         return meta
 
+    _checklist_flags = checklist_line_flags(lines)
     i = 0
-    _in_checklist = False
     while i < len(lines):
         line = lines[i]
-        _hm = re.match(r"^(#{1,6})\s+(.*)$", line)
-        if _hm:
-            _in_checklist = "checklist" in _hm.group(2).lower()
         out.append(line)
         heading = re.match(r"^(#{1,6})\s+(.*)$", line)
         if heading and not has_meta_after(i):
@@ -848,7 +861,7 @@ def transform_text(text: str, rel: str, existing_ids: list[str],
             extra = [f"governed_by: {', '.join(global_consts)}"] if global_consts else []
             out += _meta_lines(bullet.group(1), kind_for_id(bullet.group(1)) or "requirement", extra)
         task = re.match(r"^\s*-\s*\[[ xX]\]\s+(.*)$", line)
-        if task and is_task_bearing(rel) and not _in_checklist and not has_meta_after(i):
+        if task and is_task_bearing(rel) and not _checklist_flags[i] and not has_meta_after(i):
             local, missing = extract_task_local(task.group(1), {})
             if missing:
                 local = generated_local_id(task.group(1), _taken)

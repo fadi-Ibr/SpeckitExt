@@ -52,6 +52,27 @@ def is_task_bearing(rel_path: str) -> bool:
     return document_role(rel_path) == "tasks"
 
 
+def checklist_line_flags(lines: list[str]) -> list[bool]:
+    """Per-line checklist membership by Markdown heading hierarchy.
+
+    A heading whose text mentions "checklist" owns itself and every
+    descendant heading/line until the next heading of equal or higher
+    level. Shared by parsing and migration so there is exactly one
+    interpretation of checklist boundaries."""
+    flags: list[bool] = []
+    checklist_level: int | None = None
+    for line in lines:
+        m = HEADING_RE.match(line)
+        if m:
+            level = len(m.group(1))
+            if checklist_level is not None and level <= checklist_level:
+                checklist_level = None
+            if checklist_level is None and "checklist" in m.group(2).lower():
+                checklist_level = level
+        flags.append(checklist_level is not None)
+    return flags
+
+
 def slugify(heading: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", heading.lower()).strip("-")
     return slug or "section"
@@ -216,13 +237,7 @@ def parse_text(text: str, rel_path: str, identity_map: dict | None = None) -> Do
     lines = text.replace("\r\n", "\n").split("\n")
     doc = Document(path=rel_path, raw=text)
     doc.role = document_role(rel_path)
-    _in_checklist_heading = False
-    _checklist_flags: list[bool] = []
-    for _ln in lines:
-        _hm = HEADING_RE.match(_ln)
-        if _hm:
-            _in_checklist_heading = "checklist" in _hm.group(2).lower()
-        _checklist_flags.append(_in_checklist_heading)
+    _checklist_flags = checklist_line_flags(lines)
     def _is_task_line(idx: int) -> bool:
         return bool(TASK_RE.match(lines[idx])) and doc.role == "tasks" and not _checklist_flags[idx]
     def _is_checklist_line(idx: int) -> bool:
@@ -265,7 +280,13 @@ def parse_text(text: str, rel_path: str, identity_map: dict | None = None) -> Do
             if 0 < start - line_no <= 2 and _clear(line_no, start):
                 return dict(meta)
         for start, end, meta in meta_blocks:
-            if 0 < line_no - end <= 2 and _clear(end, line_no):
+            # A block directly following a heading/task/bullet line belongs
+            # to that section; a later heading (e.g. a checklist heading
+            # right after a task's metadata) must not steal it.
+            prev_owned = start > 0 and bool(
+                HEADING_RE.match(lines[start - 1]) or TASK_RE.match(lines[start - 1])
+                or BULLET_ID_RE.match(lines[start - 1]))
+            if 0 < line_no - end <= 2 and _clear(end, line_no) and not prev_owned:
                 return dict(meta)
         return {}
 

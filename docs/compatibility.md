@@ -42,6 +42,19 @@ otherwise modifies the user's Spec Kit installation.
 - Qualified references (`001-auth::FR-001`) are the explicit cross-feature
   form. Unqualified references resolve inside the owning feature;
   ambiguous or dangling references fail validation with alternatives.
+- Identity continuity: deleting or renaming a mapped entity is an error
+  (`IDENTITY_DISAPPEARED`) unless `.speckitext/identity.json` records it
+  in `reconciliations` (`removed`, or `reassigned` with a `replacement`,
+  plus a `reason`) while retaining the old entity record. The field is
+  additive within identity-map version 1; maps without it keep working,
+  and migration carries reconciliations forward transactionally.
+- Governance references (`SCOPED` scope entries and `CONDITIONAL`
+  `component == ...` / `has_component(...)`, qualified forms supported)
+  share one resolution contract: they must name exactly one existing
+  component, unambiguously and in the correct feature context, or
+  validation blocks compilation.
+- In `tasks.md`, a checklist heading owns its whole heading subtree;
+  nested checklist items are never implementation tasks.
 - Schema 1.0 context packages are incompatible with the 2.0 compiler and
   are detected as such (`incompatible package schema version`); recompile
   them — they are never silently reinterpreted under the new identity

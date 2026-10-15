@@ -4,12 +4,33 @@ from pathlib import Path
 
 from speckitext.compiler import compile_context
 from speckitext.graph import Graph
-from tests.conftest import CONSTITUTION, PLAN, SPEC, TASKS
+from tests.conftest import PLAN, SPEC, TASKS
+
+
+def _scaled_constitution(features: int) -> str:
+    # Governance must name scaled components by canonical identity: the
+    # shared fixture's bare COMP-001/COMP-002 do not exist once components
+    # are renumbered per feature, and a global bare reference may not pick
+    # one feature's component by coincidence. Scoped/conditional rules
+    # target the compiled feature (001-f1) exactly, as the original
+    # constant-size constitution intended.
+    return ("# Demo Constitution\n\n### CON-001: Test first\n<!-- speckitext\n"
+            "id: CON-001\nkind: constitution\napplicability: GLOBAL\n-->\n"
+            "Every change ships with a failing-then-passing test.\n"
+            "\n### CON-102: Auth hardening\n<!-- speckitext\nid: CON-102\n"
+            "kind: constitution\napplicability: SCOPED\nscope: 001-f1::COMP-101\n-->\n"
+            "Auth component must hash passwords with a slow KDF.\n"
+            "\n### CON-103: Audit logging\n<!-- speckitext\nid: CON-103\n"
+            "kind: constitution\napplicability: CONDITIONAL\ncondition: component == 001-f1::COMP-101\n-->\n"
+            "Auth operations must emit audit log lines.\n"
+            "\n### CON-104: UI rule\n<!-- speckitext\nid: CON-104\n"
+            "kind: constitution\napplicability: SCOPED\nscope: 001-f1::COMP-102\n-->\n"
+            "UI components must support keyboard navigation.\n")
 
 
 def _scaled(root: Path, features: int) -> Path:
     (root / ".specify/memory").mkdir(parents=True, exist_ok=True)
-    (root / ".specify/memory/constitution.md").write_text(CONSTITUTION, encoding="utf-8")
+    (root / ".specify/memory/constitution.md").write_text(_scaled_constitution(features), encoding="utf-8")
     for i in range(1, features + 1):
         d = root / f"specs/{i:03d}-f{i}"
         d.mkdir(parents=True, exist_ok=True)
