@@ -1,0 +1,28 @@
+schema_version: "1.0"
+
+bundle:
+  id: "speckitext"
+  name: "SpeckitExt Traceability"
+  version: "1.0.0"
+  role: "developer"
+  description: "Joint installation of the SpeckitExt traceability preset and context extension: structured planning, deterministic scoped context compilation, batch planning, and full migration."
+  author: "SpeckitExt"
+  license: "MIT"
+
+requires:
+  speckit_version: ">=0.9.0"
+  tools: []
+  mcp: []
+
+provides:
+  presets:
+    - id: "traceability"
+      version: "1.0.0"
+      priority: 10
+      strategy: "replace"
+  extensions:
+    - id: "traceability"
+      version: "1.0.0"
+      priority: 10
+
+tags: ["traceability", "context", "planning", "speckitext"]

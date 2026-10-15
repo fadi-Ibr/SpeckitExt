@@ -1,0 +1,48 @@
+schema_version: "1.0"
+
+extension:
+  id: "traceability"
+  name: "SpeckitExt Traceability Context"
+  version: "1.0.0"
+  description: "Deterministic traceability graph validation, batch planning, scoped context compilation, impact analysis, and full migration"
+  author: "SpeckitExt"
+  repository: "https://github.com/fadi-Ibr/SpeckitExt"
+  license: "MIT"
+
+requires:
+  speckit_version: ">=0.9.0"
+  commands:
+    - "speckit.tasks"
+    - "speckit.implement"
+
+provides:
+  commands:
+    - name: "speckit.traceability.validate"
+      file: "commands/speckit.traceability.validate.md"
+      description: "Validate the traceability graph (IDs, references, cycles, governance)"
+    - name: "speckit.traceability.compile"
+      file: "commands/speckit.traceability.compile.md"
+      description: "Compile a task/batch-scoped context package"
+    - name: "speckit.traceability.batch"
+      file: "commands/speckit.traceability.batch.md"
+      description: "Suggest coherent dependency-aware task batches"
+    - name: "speckit.traceability.impact"
+      file: "commands/speckit.traceability.impact.md"
+      description: "Analyze downstream impact of changed artifacts"
+    - name: "speckit.traceability.expand"
+      file: "commands/speckit.traceability.expand.md"
+      description: "Deterministically expand a compiled context package"
+    - name: "speckit.traceability.migrate"
+      file: "commands/speckit.traceability.migrate.md"
+      description: "Full all-or-nothing migration of a legacy Spec Kit project"
+
+hooks:
+  after_tasks:
+    command: "speckit.traceability.validate"
+    optional: false
+    description: "Traceability validation gate after task generation"
+
+tags:
+  - "traceability"
+  - "context"
+  - "validation"
