@@ -9,7 +9,7 @@ from . import COMPILER_VERSION, SCHEMA_VERSION
 from .fingerprint import fingerprint_text
 from .governance import resolve_governance
 from .graph import Graph
-from .validate import validate_graph
+from .validate import validate_all
 
 PACKAGE_META_RE = re.compile(r"<!--\s*speckitext-package\s*\n(.*?)\n-->", re.DOTALL)
 
@@ -63,7 +63,7 @@ def _collect(graph: Graph, task_ids: list[str]) -> tuple[list[str], list[str], l
 def compile_context(graph: Graph, project: Path, task_ids: list[str],
                     expanded: list[dict] | None = None) -> dict:
     task_ids = sorted(set(task_ids))
-    diags = validate_graph(graph)
+    diags = validate_all(graph)
     errors = [x for x in diags if x.severity == "error"]
     if errors:
         raise CompileError("graph validation failed: " +

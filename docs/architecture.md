@@ -87,6 +87,33 @@ the transaction `failed`. `--rollback` restores an activated transaction.
 Re-running `--apply` on a migrated, valid project is a no-op. There is no
 partial or gradual mode, and scoped implementation stays gated on validation.
 
+## Readiness, registration, compatibility, deployment (1.1.0)
+
+- `readiness.py` adds implementation-readiness validation on top of graph
+  integrity: every task needs `Objective:`/`Scope:`/`Accept:` lines, no
+  unresolved placeholders, and a `verified_by` target naming an executable
+  check. `validate` and `compile` enforce graph + readiness; migration's
+  staged gate intentionally remains graph-only (readiness is then enforced at
+  validate/compile time). Deterministic checks reject mechanical failures;
+  semantic specificity remains an authoring obligation in the tasks command.
+- `registration.py` classifies the *actually registered* `speckit-implement`
+  per integration (speckitext / upstream / unknown / missing / conflict) from
+  the files an agent will load, including project-local shadowing detection.
+  The implementation command self-checks via doctor and stops rather than
+  falling back to upstream's broad-loading outline.
+- `compat.py` powers `speckitext doctor`: tested-compatible / untested /
+  unsupported / unknown Spec Kit classification derived from actual
+  integration tests (never from the manifest range), multi-executable
+  detection, agent CLI inventory, and per-project metadata from
+  `.specify/speckitext.json`. See docs/compatibility.md.
+- `install.py` is the user-level installer: one canonical runtime plus
+  hash-tracked SKILL.md adapters in verified per-agent skill directories
+  (Codex and Muse share `~/.agents/skills`). It never overwrites unowned or
+  user-modified files. See docs/global-installation.md.
+- `bootstrap.py` activates SpeckitExt in NEW projects through upstream APIs
+  only, cycling `integration use` so every requested integration receives the
+  registered override, and refuses established projects.
+
 ## Compatibility and security
 
 - Uses only upstream-supported preset composition (`wrap` with

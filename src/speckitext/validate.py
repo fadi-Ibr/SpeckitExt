@@ -88,6 +88,12 @@ def validate_graph(graph: Graph) -> list[Diagnostic]:
     return sorted(d, key=lambda x: (x.code, x.node_id, x.path))
 
 
+def validate_all(graph: Graph) -> list[Diagnostic]:
+    """Graph integrity + implementation readiness (the compile/validate gate)."""
+    from .readiness import validate_readiness
+    return validate_graph(graph) + validate_readiness(graph)
+
+
 def _path(graph: Graph, node_id: str) -> str:
     sec = graph.nodes.get(node_id)
     return sec.path if sec else ""

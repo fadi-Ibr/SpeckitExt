@@ -12,7 +12,75 @@ from .compiler import CompileError, compile_context, expand_context, package_sta
 from .graph import Graph
 from .impact import impact_for_files, impact_for_ids
 from .migration import Migration
-from .validate import is_valid, validate_graph
+from .validate import is_valid, validate_all, validate_graph
+
+
+def cmd_doctor(args) -> int:
+    from .compat import agent_info, project_metadata, speckitext_info, specify_info
+    from .install import global_status
+    from .registration import registration_status
+    report: dict = {"speckitext": speckitext_info(), "specify": specify_info(),
+                    "agents": agent_info()}
+    healthy = report["specify"]["classification"] in ("tested-compatible", "untested")
+    if args.global_scope:
+        report["global"] = global_status(Path(args.home) if args.home else None)
+    if args.project:
+        report["project"] = project_metadata(Path(args.project))
+        report["registration"] = registration_status(Path(args.project))["integrations"]
+        if not any(v["override_active"] for v in report["registration"].values()):
+            healthy = False
+    report["healthy"] = healthy
+    if args.json:
+        _print(report, True)
+    else:
+        s = report["specify"]
+        print(f"speckitext {report['speckitext']['package_version']} "
+              f"(schema {report['speckitext']['schema_version']}, "
+              f"compiler {report['speckitext']['compiler_version']})")
+        print(f"specify: {s['distribution_version'] or 'not found'} "
+              f"[{s['classification']}] via {s['active_executable'] or '-'} "
+              f"({s['installation_source']})")
+        print(f"tested specify versions: {', '.join(s['tested_versions'])}; "
+              f"upstream reference {s['upstream_reference']['commit'][:12]} "
+              f"(source {s['upstream_reference']['source_version']})")
+        for key, a in report["agents"].items():
+            print(f"agent {key}: {'available ' + str(a['version']) if a['available'] else 'NOT FOUND'}")
+        if "global" in report:
+            for key, g in report["global"]["agents"].items():
+                print(f"global {key}: skill {'installed' if g['installed'] else 'not installed'} "
+                      f"at {g['skill_file']}")
+        if "registration" in report:
+            for key, r in report["registration"].items():
+                print(f"registration {key}: {r['state']} — {r['diagnostic']}")
+        print("status:", "OK" if healthy else "ATTENTION (see diagnostics)")
+    return 0 if healthy else 1
+
+
+def cmd_install(args) -> int:
+    from .install import install_global
+    result = install_global(Path(args.home) if args.home else None, force=args.force)
+    _print(result, True)
+    return 0 if result["status"] == "installed" else 1
+
+
+def cmd_uninstall(args) -> int:
+    from .install import uninstall_global
+    result = uninstall_global(Path(args.home) if args.home else None, force=args.force)
+    _print(result, True)
+    return 0 if result["status"] == "uninstalled" else 1
+
+
+def cmd_bootstrap(args) -> int:
+    from .bootstrap import DEFAULT_INTEGRATIONS, bootstrap_project
+    integrations = tuple(x.strip() for x in args.integrations.split(",") if x.strip()) \
+        if args.integrations else DEFAULT_INTEGRATIONS
+    try:
+        result = bootstrap_project(Path(args.project), integrations,
+                                   args.preset_dir, args.extension_dir)
+    except (ValueError, FileNotFoundError) as exc:
+        print(f"error: {exc}", file=sys.stderr); return 2
+    _print(result, True)
+    return 0 if result["status"].startswith("bootstrapped") else 1
 
 
 def _graph(args) -> Graph:
@@ -26,7 +94,7 @@ def _print(data, as_json: bool) -> None:
 
 def cmd_validate(args) -> int:
     graph = _graph(args)
-    diags = validate_graph(graph)
+    diags = validate_graph(graph) if args.graph_only else validate_all(graph)
     payload = {"project": str(args.project), "nodes": len(graph.nodes),
                "valid": is_valid(diags), "diagnostics": [d.to_dict() for d in diags]}
     if args.package:
@@ -60,9 +128,9 @@ def cmd_compile(args) -> int:
 
 def cmd_batch(args) -> int:
     graph = _graph(args)
-    diags = validate_graph(graph)
+    diags = validate_all(graph)
     if not is_valid(diags):
-        print("error: graph invalid; run `speckitext validate` for diagnostics", file=sys.stderr)
+        print("error: graph not implementation-ready; run `speckitext validate` for diagnostics", file=sys.stderr)
         return 1
     batches = suggest_batches(graph, max_tasks=args.max_tasks,
                               max_context_chars=args.max_context_chars)
@@ -124,6 +192,8 @@ def build_parser() -> argparse.ArgumentParser:
     v = sub.add_parser("validate", help="validate the traceability graph")
     v.add_argument("--project", required=True)
     v.add_argument("--package", help="also check a compiled package for staleness")
+    v.add_argument("--graph-only", action="store_true",
+                   help="graph integrity only; skip implementation-readiness checks")
     v.set_defaults(fn=cmd_validate)
 
     c = sub.add_parser("compile", help="compile a task/batch-scoped context package")
@@ -162,6 +232,33 @@ def build_parser() -> argparse.ArgumentParser:
     mg.add_argument("--txn", help="transaction id for rollback")
     mg.add_argument("--fail-after", type=int, help=argparse.SUPPRESS)
     mg.set_defaults(fn=cmd_migrate)
+
+    doc = sub.add_parser("doctor", help="compatibility and registration diagnosis")
+    doc.add_argument("--json", action="store_true")
+    doc.add_argument("--global", dest="global_scope", action="store_true",
+                     help="include user-level (global) installation status")
+    doc.add_argument("--project", help="include project registration/metadata status")
+    doc.add_argument("--home", help=argparse.SUPPRESS)
+    doc.set_defaults(fn=cmd_doctor)
+
+    ins = sub.add_parser("install", help="user-level (global) SpeckitExt skill installation")
+    ins.add_argument("--global", dest="global_scope", action="store_true", required=True)
+    ins.add_argument("--force", action="store_true")
+    ins.add_argument("--home", help=argparse.SUPPRESS)
+    ins.set_defaults(fn=cmd_install)
+
+    un = sub.add_parser("uninstall", help="remove user-level SpeckitExt-owned skill files")
+    un.add_argument("--global", dest="global_scope", action="store_true", required=True)
+    un.add_argument("--force", action="store_true")
+    un.add_argument("--home", help=argparse.SUPPRESS)
+    un.set_defaults(fn=cmd_uninstall)
+
+    bo = sub.add_parser("bootstrap", help="activate SpeckitExt in a NEW Spec Kit project")
+    bo.add_argument("--project", required=True)
+    bo.add_argument("--integrations", help="comma-separated: claude,codex,kimi,muse")
+    bo.add_argument("--preset-dir")
+    bo.add_argument("--extension-dir")
+    bo.set_defaults(fn=cmd_bootstrap)
     return p
 
 

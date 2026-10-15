@@ -12,6 +12,15 @@ You **MUST** consider the user input before proceeding (if not empty). The input
 names the task ID(s) to implement (e.g. `T003` or `T003,T004`), or is empty to
 request a suggested batch.
 
+## Registration Self-Check (before anything else)
+
+Run `speckitext doctor --project . --json` and confirm
+`registration.<this agent>.override_active` is `true`. If it is not — the
+effective speckit-implement is missing, unknown, or the upstream version, or a
+project-local skill shadows this one — STOP and report that diagnostic to the
+user verbatim. Never fall back to the upstream implementation workflow
+(whole-document loading) on your own initiative.
+
 ## Pre-Execution Checks
 
 **Check for extension hooks (before implementation)**:

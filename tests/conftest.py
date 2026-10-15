@@ -130,6 +130,9 @@ verified_by: VER-001
 affects_component: COMP-001
 feature: 001-demo
 -->
+  Objective: Auth module skeleton exists and imports cleanly
+  Scope: src/auth.py
+  Accept: src/auth.py imports with no side effects; package layout matches plan
 - [ ] T002 Implement login endpoint for FR-001 in src/auth.py
 <!-- speckitext
 id: T002
@@ -141,6 +144,9 @@ verified_by: VER-001
 affects_component: COMP-001
 feature: 001-demo
 -->
+  Objective: POST /login returns a session token for valid credentials
+  Scope: src/auth.py
+  Accept: valid login returns 200 with token; bad password returns 401
 - [ ] T003 Add password hashing for FR-001 in src/auth.py
 <!-- speckitext
 id: T003
@@ -151,6 +157,9 @@ verified_by: VER-001
 affects_component: COMP-001
 feature: 001-demo
 -->
+  Objective: Passwords are hashed with a slow KDF before storage
+  Scope: src/auth.py
+  Accept: stored value is not plaintext and verifies via the KDF check
 - [ ] T004 Build dashboard page for FR-002 in src/ui.py
 <!-- speckitext
 id: T004
@@ -160,6 +169,9 @@ verified_by: VER-002
 affects_component: COMP-002
 feature: 001-demo
 -->
+  Objective: Dashboard page renders for an authenticated user
+  Scope: src/ui.py
+  Accept: authenticated request renders dashboard; anonymous request redirects to login
 - [ ] T005 Export reports as CSV for FR-003 in src/reports.py
 <!-- speckitext
 id: T005
@@ -168,6 +180,9 @@ satisfies: FR-003
 verified_by: VER-001
 feature: 001-demo
 -->
+  Objective: Reports export downloads a CSV of the current report
+  Scope: src/reports.py
+  Accept: export returns text/csv with header row and one row per record
 """
 
 

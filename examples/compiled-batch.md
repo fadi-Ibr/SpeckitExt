@@ -1,10 +1,10 @@
 <!-- speckitext-package
-{"blocked_prerequisites":[],"compiler_version":"1.0.0","expansions":[],"governance_excluded":[{"applicability":"SCOPED","id":"CON-004","reason":"scope ['COMP-002'] does not intersect selected components ['COMP-001']"}],"governance_included":[{"applicability":"GLOBAL","id":"CON-001","reason":"GLOBAL: always included"},{"applicability":"SCOPED","id":"CON-002","reason":"SCOPED: scope intersects COMP-001"},{"applicability":"CONDITIONAL","id":"CON-003","reason":"CONDITIONAL: condition true: component == COMP-001"}],"included_ids":["CON-001","CON-002","CON-003","FR-001","DEC-001","COMP-001","CTR-001","VER-001","T001","T002","T003"],"package_fingerprint":"sha256:15e6e077a5cc158c8eef496210a69b7c4662dfbdb0460ebe6cc38b743e26d879","prerequisites":["T001"],"schema_version":"1.0","selected_tasks":["T002","T003"],"source_refs":[{"anchor":"con-001-test-first","fingerprint":"sha256:1e7181c1f42c443319a002b36c7f9f5ee23f7d6ee950da36883eeca1d61b63d2","id":"CON-001","kind":"constitution","lines":[3,10],"path":".specify/memory/constitution.md","reason":"GLOBAL: always included"},{"anchor":"con-002-auth-hardening","fingerprint":"sha256:91c0cc6fa826be73eba90eab5815067b2d43c8d6c713fbacc6fb98090ecb8b8c","id":"CON-002","kind":"constitution","lines":[11,19],"path":".specify/memory/constitution.md","reason":"SCOPED: scope intersects COMP-001"},{"anchor":"con-003-audit-logging","fingerprint":"sha256:bfe935b9508e010c2e82d4affea50a7354ed0f03a673e289509df983a17d9861","id":"CON-003","kind":"constitution","lines":[20,28],"path":".specify/memory/constitution.md","reason":"CONDITIONAL: condition true: component == COMP-001"},{"anchor":"fr-001","fingerprint":"sha256:3de66e0f23035dd69d292cc5fe067fb14349affcd8a62f367579d5455780ef1d","id":"FR-001","kind":"requirement","lines":[3,9],"path":"specs/001-demo/spec.md","reason":"T002 --satisfies--> FR-001"},{"anchor":"dec-001-session-tokens","fingerprint":"sha256:90414ec2b7750148ec2dbb47d7bcf7ce91c69b34c07671b95d1b7524737680ac","id":"DEC-001","kind":"decision","lines":[3,12],"path":"specs/001-demo/plan.md","reason":"T002 --implements--> DEC-001"},{"anchor":"comp-001-auth-service","fingerprint":"sha256:2beb5cf88fa8cdd88ba67f26759755c86154154f0fd11a4f646f5019ba27ac0b","id":"COMP-001","kind":"component","lines":[13,20],"path":"specs/001-demo/plan.md","reason":"T002 --affects_component--> COMP-001"},{"anchor":"ctr-001-login-api","fingerprint":"sha256:3d42d5c463e0d844d8e052498cd574fd615f9eba88972cdc81b6feb50ef857ad","id":"CTR-001","kind":"contract","lines":[29,36],"path":"specs/001-demo/plan.md","reason":"T002 --implements--> CTR-001"},{"anchor":"ver-001-auth-tests","fingerprint":"sha256:797cf8aba5e832f0c857b26f71c6f7e2a03459568249bc71551d15933f59c68a","id":"VER-001","kind":"verification","lines":[3,9],"path":"specs/001-demo/tasks.md","reason":"T002 --verified_by--> VER-001"},{"anchor":"t001","fingerprint":"sha256:9abff195d219da5e7a68c39ecec596b2ffa879f510817d1aea4845b6d34582cf","id":"T001","kind":"task","lines":[17,25],"path":"specs/001-demo/tasks.md","reason":"completed prerequisite"},{"anchor":"t002","fingerprint":"sha256:3835d2ff3e5a1618a1cf740b3dd56822dfa465216c4f8facf3017f962ba07784","id":"T002","kind":"task","lines":[26,36],"path":"specs/001-demo/tasks.md","reason":"selected task"},{"anchor":"t003","fingerprint":"sha256:ed53ad4559b1f47b1994a7b48bb17e954e19b26690f5fad61d2da2b84133dd0f","id":"T003","kind":"task","lines":[37,46],"path":"specs/001-demo/tasks.md","reason":"selected task"}],"validation":"pass"}
+{"blocked_prerequisites":[],"compiler_version":"1.1.0","expansions":[],"governance_excluded":[{"applicability":"SCOPED","id":"CON-004","reason":"scope ['COMP-002'] does not intersect selected components ['COMP-001']"}],"governance_included":[{"applicability":"GLOBAL","id":"CON-001","reason":"GLOBAL: always included"},{"applicability":"SCOPED","id":"CON-002","reason":"SCOPED: scope intersects COMP-001"},{"applicability":"CONDITIONAL","id":"CON-003","reason":"CONDITIONAL: condition true: component == COMP-001"}],"included_ids":["CON-001","CON-002","CON-003","FR-001","DEC-001","COMP-001","CTR-001","VER-001","T001","T002","T003"],"package_fingerprint":"sha256:2957b2c2a7ec05e4e8fdf65672ac646a00b73b3b139eb0f3dbf0888082d8db37","prerequisites":["T001"],"schema_version":"1.0","selected_tasks":["T002","T003"],"source_refs":[{"anchor":"con-001-test-first","fingerprint":"sha256:1e7181c1f42c443319a002b36c7f9f5ee23f7d6ee950da36883eeca1d61b63d2","id":"CON-001","kind":"constitution","lines":[3,10],"path":".specify/memory/constitution.md","reason":"GLOBAL: always included"},{"anchor":"con-002-auth-hardening","fingerprint":"sha256:91c0cc6fa826be73eba90eab5815067b2d43c8d6c713fbacc6fb98090ecb8b8c","id":"CON-002","kind":"constitution","lines":[11,19],"path":".specify/memory/constitution.md","reason":"SCOPED: scope intersects COMP-001"},{"anchor":"con-003-audit-logging","fingerprint":"sha256:bfe935b9508e010c2e82d4affea50a7354ed0f03a673e289509df983a17d9861","id":"CON-003","kind":"constitution","lines":[20,28],"path":".specify/memory/constitution.md","reason":"CONDITIONAL: condition true: component == COMP-001"},{"anchor":"fr-001","fingerprint":"sha256:3de66e0f23035dd69d292cc5fe067fb14349affcd8a62f367579d5455780ef1d","id":"FR-001","kind":"requirement","lines":[3,9],"path":"specs/001-demo/spec.md","reason":"T002 --satisfies--> FR-001"},{"anchor":"dec-001-session-tokens","fingerprint":"sha256:90414ec2b7750148ec2dbb47d7bcf7ce91c69b34c07671b95d1b7524737680ac","id":"DEC-001","kind":"decision","lines":[3,12],"path":"specs/001-demo/plan.md","reason":"T002 --implements--> DEC-001"},{"anchor":"comp-001-auth-service","fingerprint":"sha256:2beb5cf88fa8cdd88ba67f26759755c86154154f0fd11a4f646f5019ba27ac0b","id":"COMP-001","kind":"component","lines":[13,20],"path":"specs/001-demo/plan.md","reason":"T002 --affects_component--> COMP-001"},{"anchor":"ctr-001-login-api","fingerprint":"sha256:3d42d5c463e0d844d8e052498cd574fd615f9eba88972cdc81b6feb50ef857ad","id":"CTR-001","kind":"contract","lines":[29,36],"path":"specs/001-demo/plan.md","reason":"T002 --implements--> CTR-001"},{"anchor":"ver-001-auth-tests","fingerprint":"sha256:797cf8aba5e832f0c857b26f71c6f7e2a03459568249bc71551d15933f59c68a","id":"VER-001","kind":"verification","lines":[3,9],"path":"specs/001-demo/tasks.md","reason":"T002 --verified_by--> VER-001"},{"anchor":"t001","fingerprint":"sha256:b32025151e8d041d0efe241c9f3e53dcc3db5c2789f5681d9aba750fd647ffc7","id":"T001","kind":"task","lines":[17,28],"path":"specs/001-demo/tasks.md","reason":"completed prerequisite"},{"anchor":"t002","fingerprint":"sha256:7731530483e91547b0f61c65b39c57ef11350c434fd76669631cb7eb56c0f525","id":"T002","kind":"task","lines":[29,42],"path":"specs/001-demo/tasks.md","reason":"selected task"},{"anchor":"t003","fingerprint":"sha256:10b278d5dbcdaaec5049748c908fe5c44844c7ec55ea166808f598e8ae647d49","id":"T003","kind":"task","lines":[43,55],"path":"specs/001-demo/tasks.md","reason":"selected task"}],"validation":"pass"}
 -->
 # SpeckitExt Context Package
 
 - Selected tasks: T002, T003
-- Compiler: speckitext 1.0.0 / schema 1.0
+- Compiler: speckitext 1.1.0 / schema 1.0
 - Validation: pass
 
 ## Source provenance
@@ -19,9 +19,9 @@
 | COMP-001 | component | specs/001-demo/plan.md | comp-001-auth-service | sha256:2beb5cf88fa8… | T002 --affects_component--> COMP-001 |
 | CTR-001 | contract | specs/001-demo/plan.md | ctr-001-login-api | sha256:3d42d5c463e0… | T002 --implements--> CTR-001 |
 | VER-001 | verification | specs/001-demo/tasks.md | ver-001-auth-tests | sha256:797cf8aba5e8… | T002 --verified_by--> VER-001 |
-| T001 | task | specs/001-demo/tasks.md | t001 | sha256:9abff195d219… | completed prerequisite |
-| T002 | task | specs/001-demo/tasks.md | t002 | sha256:3835d2ff3e5a… | selected task |
-| T003 | task | specs/001-demo/tasks.md | t003 | sha256:ed53ad4559b1… | selected task |
+| T001 | task | specs/001-demo/tasks.md | t001 | sha256:b32025151e8d… | completed prerequisite |
+| T002 | task | specs/001-demo/tasks.md | t002 | sha256:7731530483e9… | selected task |
+| T003 | task | specs/001-demo/tasks.md | t003 | sha256:10b278d5dbcd… | selected task |
 
 ## Governing rules (applicable only)
 
@@ -129,8 +129,11 @@ verified_by: VER-001
 affects_component: COMP-001
 feature: 001-demo
 -->
+  Objective: Auth module skeleton exists and imports cleanly
+  Scope: src/auth.py
+  Accept: src/auth.py imports with no side effects; package layout matches plan
 
-<!-- source: specs/001-demo/tasks.md#t001 lines 17-25 fingerprint sha256:9abff195d219da5e7a68c39ecec596b2ffa879f510817d1aea4845b6d34582cf -->
+<!-- source: specs/001-demo/tasks.md#t001 lines 17-28 fingerprint sha256:b32025151e8d041d0efe241c9f3e53dcc3db5c2789f5681d9aba750fd647ffc7 -->
 
 - [ ] T002 Implement login endpoint for FR-001 in src/auth.py
 <!-- speckitext
@@ -143,8 +146,11 @@ verified_by: VER-001
 affects_component: COMP-001
 feature: 001-demo
 -->
+  Objective: POST /login returns a session token for valid credentials
+  Scope: src/auth.py
+  Accept: valid login returns 200 with token; bad password returns 401
 
-<!-- source: specs/001-demo/tasks.md#t002 lines 26-36 fingerprint sha256:3835d2ff3e5a1618a1cf740b3dd56822dfa465216c4f8facf3017f962ba07784 -->
+<!-- source: specs/001-demo/tasks.md#t002 lines 29-42 fingerprint sha256:7731530483e91547b0f61c65b39c57ef11350c434fd76669631cb7eb56c0f525 -->
 
 - [ ] T003 Add password hashing for FR-001 in src/auth.py
 <!-- speckitext
@@ -156,8 +162,11 @@ verified_by: VER-001
 affects_component: COMP-001
 feature: 001-demo
 -->
+  Objective: Passwords are hashed with a slow KDF before storage
+  Scope: src/auth.py
+  Accept: stored value is not plaintext and verifies via the KDF check
 
-<!-- source: specs/001-demo/tasks.md#t003 lines 37-46 fingerprint sha256:ed53ad4559b1f47b1994a7b48bb17e954e19b26690f5fad61d2da2b84133dd0f -->
+<!-- source: specs/001-demo/tasks.md#t003 lines 43-55 fingerprint sha256:10b278d5dbcdaaec5049748c908fe5c44844c7ec55ea166808f598e8ae647d49 -->
 
 ## Governance excluded (explainable trace)
 

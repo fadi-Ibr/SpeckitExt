@@ -33,6 +33,27 @@ authoring time, save on every repeated implementation run.
 Architecture, schema, and contracts: [docs/architecture.md](docs/architecture.md).
 Worked example: [examples/](examples/README.md).
 
+## What's new in 1.1.0
+
+- **Implementation-readiness gate**: tasks must carry `Objective:`/`Scope:`/
+  `Accept:` lines, no placeholders, and executable verification checks —
+  `speckitext validate` and `compile` enforce it, so "Implement T042 using
+  SpeckitExt" is a sufficient assignment.
+- **Registered-override proof**: `speckitext doctor --project .` classifies the
+  `speckit-implement` each agent will actually load (SpeckitExt / upstream /
+  conflict / missing), including project-local shadowing detection. The
+  implementation command self-checks and stops rather than falling back to
+  upstream's whole-document loading.
+- **Compatibility doctor**: `speckitext doctor --json` reports tested /
+  untested / unsupported / unknown Spec Kit versions (from real integration
+  tests, not version ranges), installed agents, and per-project metadata.
+  See [docs/compatibility.md](docs/compatibility.md).
+- **Global multi-agent deployment**: `speckitext install --global` installs
+  hash-tracked skill adapters for Claude Code, Codex, Kimi Code, and Muse
+  Code; `speckitext bootstrap --project <new>` activates the preset+extension
+  for all four integrations in a new project. See
+  [docs/global-installation.md](docs/global-installation.md).
+
 ## Installation
 
 Requires Python ≥ 3.11 and a Spec Kit installation (`specify` CLI ≥ 0.9.0).
@@ -143,6 +164,22 @@ Windows and POSIX; Python 3.11+; Spec Kit ≥ 0.9.0 with any supported coding
 agent (command registration is upstream's portable mechanism). The compiler is
 stdlib-only and works offline.
 
+## Global deployment and diagnosis
+
+```bash
+speckitext install --global     # user-level skill adapters for Claude/Codex/Kimi/Muse
+speckitext doctor --global      # per-agent installed status
+speckitext doctor --json        # machine-readable compatibility report
+speckitext bootstrap --project path/to/NEW-project   # per-project activation, all integrations
+speckitext doctor --project path/to/project          # effective override per integration
+speckitext uninstall --global   # remove exactly the installer-owned files
+```
+
+Global skill discovery, project-level activation, and effective
+implementation-command precedence are different layers; see
+[docs/global-installation.md](docs/global-installation.md) for what each
+guarantees and what it cannot.
+
 ## Verification
 
 ```bash
@@ -150,6 +187,8 @@ python -m pip install -e ".[test]"
 python -m compileall -q src
 python -m pytest -q
 python -m speckitext --help
+speckitext doctor --json
+speckitext doctor --global
 git diff --check
 ```
 
