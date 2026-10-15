@@ -62,5 +62,5 @@ def test_doctor_json_shape(tmp_path, capsys):
     report = json.loads(capsys.readouterr().out)
     assert report["specify"]["classification"] in (
         "tested-compatible", "untested", "unsupported", "unknown")
-    assert report["speckitext"]["schema_version"] == "1.0"
+    assert report["speckitext"]["schema_version"] == "2.0"
     assert set(report["agents"]) == {"claude", "codex", "kimi", "muse"}

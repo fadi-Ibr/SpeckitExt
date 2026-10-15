@@ -10,7 +10,12 @@ $ARGUMENTS
 
 You **MUST** consider the user input before proceeding (if not empty). The input
 names the task ID(s) to implement (e.g. `T003` or `T003,T004`), or is empty to
-request a suggested batch.
+request a suggested batch. In multi-feature projects a local ID such as
+`T001` may repeat across features: use a qualified canonical ID
+(`001-feature::T001`) or add `--feature <feature-id>` when compiling; if the
+compiler reports ambiguity, present its qualified alternatives to the user
+and never pick one arbitrarily. A short ID that resolves unambiguously
+(single feature, or unique in the project) keeps working unchanged.
 
 ## Registration Self-Check (before anything else)
 
@@ -50,6 +55,7 @@ any checklist is incomplete.
    ```text
    speckitext validate --project .
    speckitext compile --project . --tasks <ID[,ID...]> --output .specify/context/<selection>.md
+   # multi-feature, repeated local ID: --feature <feature-id> or qualified <feature>::<ID>
    ```
 
    If validation fails or compilation rejects a stale/invalid graph, STOP and

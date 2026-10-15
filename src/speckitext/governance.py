@@ -15,7 +15,7 @@ from __future__ import annotations
 import re
 
 from .graph import Graph
-from .schema import Diagnostic
+from .schema import Diagnostic, local_part
 
 
 class ConditionError(ValueError):
@@ -145,7 +145,9 @@ def resolve_governance(graph: Graph, selected_components: list[str],
     """Return (included, excluded) traces for every constitution rule."""
     included: list[dict] = []
     excluded: list[dict] = []
-    ctx = {"component": list(selected_components), "feature": features[0] if features else "",
+    # Component comparisons accept both canonical and local forms.
+    _comps = list(selected_components) + [local_part(c) for c in selected_components]
+    ctx = {"component": _comps, "feature": features[0] if features else "",
            "features": list(features), "tag": list(tags), "kind": "task"}
     ctx["feature"] = list(features)  # feature comparisons accept any selected feature
     for sec in sorted((s for s in graph.nodes.values() if s.kind == "constitution"),
@@ -156,7 +158,8 @@ def resolve_governance(graph: Graph, selected_components: list[str],
                              "reason": "GLOBAL: always included"})
         elif applicability == "SCOPED":
             scope = [str(x) for x in (sec.meta.get("scope", []) or [])]
-            hit = [c for c in scope if c in selected_components]
+            _sel = set(selected_components) | {local_part(c) for c in selected_components}
+            hit = [c for c in scope if c in _sel or local_part(c) in _sel]
             if hit:
                 included.append({"id": sec.node_id, "applicability": "SCOPED",
                                  "reason": f"SCOPED: scope intersects {', '.join(hit)}"})

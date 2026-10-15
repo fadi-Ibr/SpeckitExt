@@ -1,16 +1,12 @@
 """Markdown parsing: sections, speckitext metadata blocks, and task lines.
 
-A section starts at an ATX heading. A section owns the lines up to the next
-heading of the same or higher level. Metadata lives in an HTML comment:
-
-    <!-- speckitext
-    key: value, value
-    -->
-
-Headings may also carry an ID directly, e.g. ``### FR-001: Do the thing`` or
-``- **FR-001**: requirement text`` bullet form used by Spec Kit spec templates.
-Tasks are checkbox lines ``- [ ] T001 ...`` / ``- [x] T001 ...`` optionally
-followed by an indented metadata comment or a ``Links:`` line.
+Identity (schema 2.0): every section has a local ID (original, e.g. T001),
+a legacy alias (exact original string; empty for ID-less tasks), a feature
+identity (from specs/<dir>, explicit feature:/canonical_id metadata, or a
+persisted identity map), and a canonical ID (<feature>::<local>, or plain
+<local> for global/shared entities). Headings/bullets/tasks are discovered
+structurally; task checkboxes are recognized even with generalized legacy
+labels (T070E, G5-T1, TR-A) or with no ID at all (deterministic T-AUTO-*).
 """
 from __future__ import annotations
 
@@ -19,14 +15,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .fingerprint import fingerprint_text
-from .schema import ID_TOKEN_RE, RELATIONS, kind_for_id
+from .identity import (feature_from_path, generated_local_id, make_canonical,
+                       sanitize_feature, split_canonical)
+from .schema import ID_TOKEN_RE, LEGACY_TASK_RE, RELATIONS, kind_for_id, local_part
 
 HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*$")
 META_START_RE = re.compile(r"^\s*<!--\s*speckitext\s*$")
 META_END_RE = re.compile(r"^\s*-->\s*$")
-TASK_RE = re.compile(r"^\s*-\s*\[(?P<mark>[ xX])\]\s+(?P<rest>.*)$")
-BULLET_ID_RE = re.compile(r"^\s*-\s*\*\*(?P<id>(?:CON|FR|SC|DEC|COMP|CTR|DM|VER|RES)-\d{3,}|T\d{3,})\*\*\s*:?\s*(?P<rest>.*)$")
+TASK_RE = re.compile(r"^\s*-\s*\[(?P<mark>[ xX])\]\s*(?P<rest>.*)$")
+BULLET_ID_RE = re.compile(r"^\s*-\s*\*\*(?P<id>(?:CON|FR|SC|DEC|COMP|CTR|DM|VER|RES)-\d{3,}|T\d{1,6}[A-Z]?|[A-Za-z0-9][A-Za-z0-9._-]*::[A-Za-z0-9_-]+)\*\*\s*:?\s*(?P<rest>.*)$")
 LINKS_RE = re.compile(r"^\s*(?:Links|Relations)\s*:\s*(?P<rest>.+)$", re.IGNORECASE)
+# Legacy task label at the very start of a checkbox body: bold, bracketed,
+# colon/dash terminated, or followed by whitespace + text. Structural only.
+_TASK_LEAD_RE = re.compile(
+    r"^(?:\*\*(?P<bold>[A-Za-z0-9][A-Za-z0-9_-]{1,40})\*\*|\[(?P<brack>[A-Za-z0-9][A-Za-z0-9_-]{1,40})\]|"
+    r"(?P<plain>[A-Z][A-Za-z0-9_-]{1,40})(?=\s*[:\-–]\s|\s+))\s*:?\s*(?P<rest>.*)$")
 
 
 def slugify(heading: str) -> str:
@@ -51,16 +54,34 @@ def _parse_meta_lines(lines: list[str]) -> dict:
 
 @dataclass
 class Section:
-    node_id: str
+    node_id: str  # canonical ID
     kind: str
     heading: str
     anchor: str
     content: str
-    path: str  # project-relative POSIX path
+    path: str
     start_line: int
     end_line: int
     meta: dict = field(default_factory=dict)
-    status: str = ""  # tasks: pending|done; others: meta status or ""
+    status: str = ""
+    local_id: str = ""
+    legacy_alias: str = ""
+    feature_id: str = ""
+    id_missing: bool = False
+
+    def __post_init__(self):
+        if not self.local_id:
+            self.local_id = split_canonical(self.node_id)[1]
+        if not self.feature_id:
+            self.feature_id = split_canonical(self.node_id)[0] or feature_from_path(self.path)
+            if str(self.meta.get("feature", "")).strip():
+                self.feature_id = sanitize_feature(str(self.meta["feature"]))
+        if "legacy_alias" in (self.meta or {}):
+            self.legacy_alias = str(self.meta["legacy_alias"])
+        elif not self.legacy_alias and not self.id_missing:
+            self.legacy_alias = self.local_id
+        if str((self.meta or {}).get("id_missing", "")).lower() == "true":
+            self.id_missing = True
 
     @property
     def fingerprint(self) -> str:
@@ -68,17 +89,27 @@ class Section:
 
     @property
     def feature(self) -> str:
-        return str(self.meta.get("feature", ""))
+        return self.feature_id or str(self.meta.get("feature", ""))
 
-    def relations(self) -> list[tuple[str, str]]:
+    def raw_relations(self) -> list[tuple[str, str]]:
         out: list[tuple[str, str]] = []
         for rel in RELATIONS:
             for target in self.meta.get(rel, []) or []:
                 out.append((rel, target))
         return out
 
+    def relations(self) -> list[tuple[str, str]]:
+        # Raw (unresolved) targets as authored; Graph resolves to canonical.
+        # Sections outside a Graph expose raw relations for compatibility.
+        resolved = self.meta.get("_resolved_relations")
+        if resolved is not None:
+            return list(resolved)
+        return self.raw_relations()
+
     def to_ref(self, reason: str = "") -> dict:
-        return {"id": self.node_id, "kind": self.kind, "path": self.path,
+        return {"id": self.node_id, "canonical_id": self.node_id,
+                "local_id": self.local_id, "legacy_alias": self.legacy_alias,
+                "feature": self.feature_id, "kind": self.kind, "path": self.path,
                 "anchor": self.anchor, "lines": [self.start_line, self.end_line],
                 "fingerprint": self.fingerprint, "reason": reason}
 
@@ -89,6 +120,7 @@ class Document:
     sections: list[Section] = field(default_factory=list)
     duplicates: list[Section] = field(default_factory=list)
     raw: str = ""
+    task_occurrences: int = 0  # independent checkbox-line count
 
 
 def _ids_in(text: str) -> list[str]:
@@ -99,14 +131,59 @@ def _ids_in(text: str) -> list[str]:
     return seen
 
 
-def parse_text(text: str, rel_path: str) -> Document:
+def _feature_for(rel_path: str, meta: dict, identity_map: dict | None) -> str:
+    if identity_map:
+        derived = feature_from_path(rel_path)
+        mapped = (identity_map.get("features") or {}).get(derived)
+        if mapped:
+            return sanitize_feature(str(mapped))
+    explicit = str(meta.get("feature", "")).strip() if meta else ""
+    if explicit:
+        return sanitize_feature(explicit)
+    return feature_from_path(rel_path)
+
+
+def _canonical_for(meta: dict, local: str, kind: str, feature: str) -> str:
+    canon = str(meta.get("canonical_id", "")).strip() if meta else ""
+    if canon:
+        return canon
+    return make_canonical(feature, local, kind)
+
+
+def extract_task_local(rest: str, meta: dict) -> tuple[str, bool]:
+    """(local_id, id_missing) for a checkbox body. Meta id wins; then a
+    canonical/standard/legacy label in structural leading position."""
+    mid = str(meta.get("id", "")).strip() if meta else ""
+    if mid:
+        return split_canonical(mid)[1], False
+    canon_meta = str(meta.get("canonical_id", "")).strip() if meta else ""
+    if canon_meta:
+        return split_canonical(canon_meta)[1], False
+    m = _TASK_LEAD_RE.match(rest.strip())
+    if m:
+        cand = m.group("bold") or m.group("brack") or m.group("plain") or ""
+        if "::" in cand:
+            return split_canonical(cand)[1], False
+        if LEGACY_TASK_RE.fullmatch(cand) or kind_for_id(cand) == "task":
+            return cand, False
+        # Structured custom ID: uppercase-led label with digit or hyphen.
+        if re.fullmatch(r"[A-Z][A-Za-z0-9_-]*", cand) and (any(c.isdigit() for c in cand) or "-" in cand or "_" in cand):
+            return cand, False
+    toks = _ids_in(rest)
+    for tok in toks:
+        if "::" in tok:
+            return split_canonical(tok)[1], False
+        if kind_for_id(tok) == "task" and LEGACY_TASK_RE.fullmatch(tok):
+            return tok, False
+    return "", True
+
+
+def parse_text(text: str, rel_path: str, identity_map: dict | None = None) -> Document:
     lines = text.replace("\r\n", "\n").split("\n")
     doc = Document(path=rel_path, raw=text)
-    # Pass 1: locate headings and metadata blocks. A metadata block belongs to
-    # the heading it directly follows (within 2 lines); a block directly before
-    # a heading is also accepted for robustness.
-    heading_idx: list[tuple[int, int, str]] = []  # (line_no, level, heading)
-    meta_blocks: list[tuple[int, int, dict]] = []  # (start_line, end_line, meta)
+    doc.task_occurrences = sum(1 for ln in lines if TASK_RE.match(ln))
+    heading_idx: list[tuple[int, int, str]] = []
+    meta_blocks: list[tuple[int, int, dict]] = []
     i = 0
     while i < len(lines):
         if META_START_RE.match(lines[i]):
@@ -123,8 +200,22 @@ def parse_text(text: str, rel_path: str) -> Document:
         i += 1
 
     def meta_for_heading(line_no: int) -> dict:
+        # A block directly following the heading wins; only then a block
+        # directly preceding it. Another heading in between breaks the
+        # association in either direction.
+        heading_lines = [h[0] for h in heading_idx]
+
+        def _clear(a: int, b: int) -> bool:
+            # No other heading/bullet/task section may start between.
+            return not any(a < h < b for h in heading_lines) and not any(
+                BULLET_ID_RE.match(lines[k]) or TASK_RE.match(lines[k])
+                for k in range(a + 1, b))
+
         for start, end, meta in meta_blocks:
-            if 0 < start - line_no <= 2 or 0 < line_no - end <= 2:
+            if 0 < start - line_no <= 2 and _clear(line_no, start):
+                return dict(meta)
+        for start, end, meta in meta_blocks:
+            if 0 < line_no - end <= 2 and _clear(end, line_no):
                 return dict(meta)
         return {}
 
@@ -137,65 +228,83 @@ def parse_text(text: str, rel_path: str) -> Document:
                 break
         return start, end
 
-    used_ids: set[int] = set()  # heading indexes consumed as sections
+    captured: set[str] = set()  # canonical IDs
+    taken_locals: dict[str, set[str]] = {}  # feature -> locals (for T-AUTO dedup)
+
     for idx, (start, level, heading) in enumerate(heading_idx):
         end_s, end_e = section_range(idx)
         content = "\n".join(lines[start:end_e])
         meta = meta_for_heading(start)
-        node_id = str(meta.get("id", "")).strip()
-        if not node_id:
+        raw_id = str(meta.get("id", "")).strip() or str(meta.get("canonical_id", "")).strip()
+        if not raw_id:
             toks = _ids_in(heading)
-            node_id = toks[0] if toks else ""
-        if not node_id:
+            raw_id = toks[0] if toks else ""
+        if not raw_id:
             continue
-        kind = str(meta.get("kind", "")).strip() or (kind_for_id(node_id) or "")
+        local = split_canonical(raw_id)[1]
+        kind = str(meta.get("kind", "")).strip() or (kind_for_id(local) or "")
         if not kind:
             continue
-        used_ids.add(idx)
-        doc.sections.append(Section(
-            node_id=node_id, kind=kind, heading=heading, anchor=slugify(heading),
-            content=content, path=rel_path, start_line=start + 1, end_line=end_e,
-            meta=meta, status=str(meta.get("status", "")).strip()))
+        feature = _feature_for(rel_path, meta, identity_map)
+        if "::" in raw_id:
+            feature = split_canonical(raw_id)[0] or feature
+        canonical = _canonical_for(meta, local, kind, feature)
+        sec = Section(node_id=canonical, kind=kind, heading=heading, anchor=slugify(heading),
+                      content=content, path=rel_path, start_line=start + 1, end_line=end_e,
+                      meta=meta, status=str(meta.get("status", "")).strip(),
+                      local_id=local, legacy_alias=local, feature_id=feature)
+        (doc.duplicates if canonical in captured else doc.sections).append(sec)
+        captured.add(canonical)
+        taken_locals.setdefault(feature, set()).add(local)
 
-    # Pass 2: bullet-ID lines (spec template style) not already captured.
-    captured = {s.node_id for s in doc.sections}
     for n, line in enumerate(lines):
         m = BULLET_ID_RE.match(line)
-        if m:
-            node_id = m.group("id")
-            is_dup = node_id in captured
-            # Content extends to next bullet-ID or next heading.
-            end = len(lines)
-            for k in range(n + 1, len(lines)):
-                if BULLET_ID_RE.match(lines[k]) or HEADING_RE.match(lines[k]):
-                    end = k; break
-            content = "\n".join(lines[n:end])
-            meta = _meta_after(lines, n, end)
-            kind = str(meta.get("kind", "")).strip() or (kind_for_id(node_id) or "")
-            sec = Section(
-                node_id=node_id, kind=kind, heading=m.group("rest")[:80] or node_id,
-                anchor=slugify(node_id), content=content, path=rel_path,
-                start_line=n + 1, end_line=end, meta={**meta, "id": node_id},
-                status=str(meta.get("status", "")).strip())
-            (doc.duplicates if is_dup else doc.sections).append(sec)
-            captured.add(node_id)
+        if not m:
+            continue
+        raw_id = m.group("id")
+        local = split_canonical(raw_id)[1]
+        end = len(lines)
+        for k in range(n + 1, len(lines)):
+            if BULLET_ID_RE.match(lines[k]) or HEADING_RE.match(lines[k]):
+                end = k; break
+        content = "\n".join(lines[n:end])
+        meta = _meta_after(lines, n, end)
+        meta_id = str(meta.get("id", "")).strip()
+        if meta_id:
+            local = split_canonical(meta_id)[1]
+        kind = str(meta.get("kind", "")).strip() or (kind_for_id(local) or "")
+        if not kind:
+            continue
+        feature = _feature_for(rel_path, meta, identity_map)
+        if "::" in raw_id:
+            feature = split_canonical(raw_id)[0] or feature
+        canonical = _canonical_for(meta, local, kind, feature)
+        sec = Section(node_id=canonical, kind=kind, heading=m.group("rest")[:80] or local,
+                      anchor=slugify(local), content=content, path=rel_path,
+                      start_line=n + 1, end_line=end, meta={**meta, "id": local},
+                      status=str(meta.get("status", "")).strip(),
+                      local_id=local, legacy_alias=local, feature_id=feature)
+        (doc.duplicates if canonical in captured else doc.sections).append(sec)
+        captured.add(canonical)
+        taken_locals.setdefault(feature, set()).add(local)
 
-    # Pass 3: task checkbox lines.
     for n, line in enumerate(lines):
         m = TASK_RE.match(line)
         if not m:
             continue
-        toks = _ids_in(m.group("rest"))
-        if not toks or kind_for_id(toks[0]) != "task":
-            continue
-        node_id = toks[0]
-        is_dup = node_id in captured
         end = len(lines)
         for k in range(n + 1, len(lines)):
             if TASK_RE.match(lines[k]) or HEADING_RE.match(lines[k]):
                 end = k; break
         block = lines[n:end]
         meta = _meta_after(lines, n, end)
+        feature = _feature_for(rel_path, meta, identity_map)
+        local, missing = extract_task_local(m.group("rest"), meta)
+        if missing:
+            taken = taken_locals.setdefault(feature, set())
+            local = generated_local_id(m.group("rest"), taken)
+        taken_locals.setdefault(feature, set()).add(local)
+        canonical = _canonical_for(meta, local, "task", feature)
         links = _links_in(block)
         for rel, targets in links.items():
             merged = list(meta.get(rel, []) or [])
@@ -203,16 +312,16 @@ def parse_text(text: str, rel_path: str) -> Document:
                 if t not in merged:
                     merged.append(t)
             meta[rel] = merged
-        sec = Section(
-            node_id=node_id, kind="task",
-            heading=m.group("rest").strip(), anchor=slugify(node_id),
-            content="\n".join(block), path=rel_path, start_line=n + 1, end_line=end,
-            meta={**meta, "id": node_id},
-            status="done" if m.group("mark").lower() == "x" else "pending")
-        (doc.duplicates if is_dup else doc.sections).append(sec)
-        captured.add(node_id)
-    # A section's own content ends where the next captured section begins, so
-    # e.g. a VER-xxx heading does not swallow the task list that follows it.
+        sec = Section(node_id=canonical, kind="task",
+                      heading=m.group("rest").strip(), anchor=slugify(local),
+                      content="\n".join(block), path=rel_path, start_line=n + 1, end_line=end,
+                      meta={**meta, "id": local},
+                      status="done" if m.group("mark").lower() == "x" else "pending",
+                      local_id=local, legacy_alias="" if missing else local,
+                      feature_id=feature, id_missing=missing)
+        (doc.duplicates if canonical in captured else doc.sections).append(sec)
+        captured.add(canonical)
+
     all_secs = doc.sections + doc.duplicates
     for sec in all_secs:
         later = [o.start_line for o in all_secs
@@ -222,6 +331,7 @@ def parse_text(text: str, rel_path: str) -> Document:
             sec.content = "\n".join(lines[sec.start_line - 1:cut - 1])
             sec.end_line = cut - 1
     doc.sections.sort(key=lambda s: s.start_line)
+    doc.duplicates.sort(key=lambda s: s.start_line)
     return doc
 
 
@@ -242,7 +352,9 @@ def _links_in(block: list[str]) -> dict[str, list[str]]:
         m = LINKS_RE.match(line)
         if m:
             for tok in _ids_in(m.group("rest")):
-                kind = kind_for_id(tok)
+                kind = kind_for_id(split_canonical(tok)[1])
+                if kind is None and LEGACY_TASK_RE.fullmatch(split_canonical(tok)[1]):
+                    kind = "task"  # Links: line is structural task context
                 rel = {"requirement": "satisfies", "success_criterion": "satisfies",
                        "task": "depends_on", "constitution": "governed_by",
                        "component": "affects_component", "decision": "implements",
@@ -253,12 +365,12 @@ def _links_in(block: list[str]) -> dict[str, list[str]]:
         dep = re.search(r"\(depends on ([^)]+)\)", line, re.IGNORECASE)
         if dep:
             for tok in _ids_in(dep.group(1)):
-                if kind_for_id(tok) == "task":
+                if kind_for_id(split_canonical(tok)[1]) == "task" or LEGACY_TASK_RE.fullmatch(split_canonical(tok)[1]):
                     out.setdefault("depends_on", []).append(tok)
     return out
 
 
-def parse_file(path: Path, project_root: Path) -> Document:
+def parse_file(path: Path, project_root: Path, identity_map: dict | None = None) -> Document:
     text = path.read_text(encoding="utf-8")
     rel = path.resolve().relative_to(project_root.resolve()).as_posix()
-    return parse_text(text, rel)
+    return parse_text(text, rel, identity_map=identity_map)

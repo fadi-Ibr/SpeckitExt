@@ -7,12 +7,12 @@ from speckitext.schema import valid_id
 
 def test_heading_and_bullet_and_task_parsing(project):
     g = Graph.build(project)
-    assert {"CON-001", "FR-001", "DEC-001", "COMP-001", "CTR-001",
-            "T001", "T002", "VER-001"} <= set(g.nodes)
+    assert {"CON-001", "001-demo::FR-001", "001-demo::DEC-001", "001-demo::COMP-001", "001-demo::CTR-001",
+            "001-demo::T001", "001-demo::T002", "001-demo::VER-001"} <= set(g.nodes)
     assert g.nodes["T001"].status == "done"
     assert g.nodes["T002"].status == "pending"
-    assert ("satisfies", "FR-001") in g.nodes["T002"].relations()
-    assert ("depends_on", "T001") in g.nodes["T002"].relations()
+    assert ("satisfies", "001-demo::FR-001") in g.nodes["T002"].relations()
+    assert ("depends_on", "001-demo::T001") in g.nodes["T002"].relations()
 
 
 def test_id_stability_across_completion_and_insertion(tmp_path):
@@ -34,7 +34,7 @@ def test_valid_id_namespaces():
 
 def test_anchor_and_fingerprint_resolve(project):
     g = Graph.build(project)
-    sec = g.nodes["FR-001"]
+    sec = g.nodes["001-demo::FR-001"]
     assert sec.path == "specs/001-demo/spec.md" and sec.anchor
     assert sec.fingerprint.startswith("sha256:") and sec.start_line >= 1
 

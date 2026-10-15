@@ -53,7 +53,7 @@ def test_relationship_change_invalidates(project, tmp_path):
     plan.write_text(plan.read_text(encoding="utf-8").replace(
         "satisfies: FR-001", "satisfies: FR-001, FR-002"), encoding="utf-8")
     # DEC-001 now pulls FR-002 into the closure; the old package omits it.
-    assert "FR-002" in [s["id"] for s in package_staleness(Graph.build(project), pkg)]
+    assert "001-demo::FR-002" in [s["id"] for s in package_staleness(Graph.build(project), pkg)]
 
 
 def test_tampered_package_detected(project, tmp_path):
@@ -72,11 +72,11 @@ def test_expansion_round_trip_and_dedup(project, tmp_path):
     result = expand_context(Graph.build(project), project, pkg, ["FR-002"],
                             "needed for redirect target")
     out.write_text(result["text"], encoding="utf-8")
-    assert "FR-002" in result["meta"]["included_ids"]
+    assert "001-demo::FR-002" in result["meta"]["included_ids"]
     assert package_staleness(Graph.build(project), out) == []
     again = expand_context(Graph.build(project), project, out, ["FR-002"], "again")
-    assert [e["id"] for e in again["meta"]["expansions"]].count("FR-002") == 1
-    assert set(again["meta"]["selected_tasks"]) == {"T002"}  # scope unchanged
+    assert [e["id"] for e in again["meta"]["expansions"]].count("001-demo::FR-002") == 1
+    assert set(again["meta"]["selected_tasks"]) == {"001-demo::T002"}  # scope unchanged
 
 
 def test_expanded_source_change_invalidates(project, tmp_path):
@@ -87,7 +87,7 @@ def test_expanded_source_change_invalidates(project, tmp_path):
     spec = project / "specs/001-demo/spec.md"
     spec.write_text(spec.read_text(encoding="utf-8").replace(
         "see a dashboard", "see a metrics dashboard"), encoding="utf-8")
-    assert "FR-002" in [s["id"] for s in package_staleness(Graph.build(project), out)]
+    assert "001-demo::FR-002" in [s["id"] for s in package_staleness(Graph.build(project), out)]
 
 
 def test_expand_task_and_stale_package_rejected(project, tmp_path):
@@ -118,7 +118,7 @@ def test_validate_cli_package_failures_exit_nonzero(project, tmp_path, capsys):
     assert "package_error" in json.loads(capsys.readouterr().out)
 
     tampered = tmp_path / "tampered.md"
-    body = pkg.read_text(encoding="utf-8").replace('"schema_version":"1.0"',
+    body = pkg.read_text(encoding="utf-8").replace('"schema_version":"2.0"',
                                                    '"schema_version":"9.9"')
     tampered.write_text(body, encoding="utf-8")
     assert main(["validate", "--project", str(project), "--package", str(tampered)]) == 1

@@ -33,6 +33,26 @@ authoring time, save on every repeated implementation run.
 Architecture, schema, and contracts: [docs/architecture.md](docs/architecture.md).
 Worked example: [examples/](examples/README.md).
 
+## What's new in 1.2.0 — multi-feature legacy compatibility
+
+- **Canonical identity**: feature-local entities are keyed
+  `<feature>::<local>` (e.g. `001-auth::T001` vs `002-billing::T001`);
+  global constitution rules stay plain (`CON-001`). Local IDs and legacy
+  aliases are preserved in source documents and in compiled packages.
+- **Legacy task discovery**: checkbox tasks are recognized with numeric
+  (`T001`, `T070E`), feature-prefixed (`G5-T1`), alphanumeric (`TR-A`,
+  `PL-C`), structured custom, and missing IDs (deterministic `T-AUTO-*`);
+  every original task occurrence maps to exactly one canonical task.
+- **Feature-aware workflow**: `speckitext compile --project . --feature
+  001-auth --tasks T001` or `--tasks 001-auth::T001`; ambiguous local IDs
+  fail with qualified alternatives, never an arbitrary pick. Batch and
+  impact output carry canonical + local + feature identity.
+- **Migration**: full transactional migration now inventories every
+  feature (counts, original/missing/duplicate IDs, proposed mappings),
+  proves original-occurrences == canonical tasks before activation, and
+  persists `.speckitext/identity.json` inside the same staged/backup/
+  rollback transaction. See docs/compatibility.md.
+
 ## What's new in 1.1.0
 
 - **Implementation-readiness gate**: tasks must carry `Objective:`/`Scope:`/

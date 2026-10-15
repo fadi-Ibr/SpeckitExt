@@ -47,10 +47,19 @@ from pathlib import Path
 
 from .fingerprint import fingerprint_bytes
 from .graph import Graph
-from .parsing import parse_text
+from .identity import (IDENTITY_PATH, IDENTITY_VERSION, feature_from_path,
+                       generated_local_id, make_canonical, split_canonical)
+from .parsing import extract_task_local, parse_text
 from .project import discover_files
 from .schema import ID_TOKEN_RE, kind_for_id
 from .validate import is_valid, validate_all, validate_graph
+
+
+def _matches_original(project, record) -> bool:
+    dest = Path(project) / record["path"]
+    if record.get("created"):
+        return not dest.is_file()
+    return dest.is_file() and _sha(dest) == record.get("backup_sha256")
 
 STATE_DIR = ".speckitext/migrations"
 JOURNAL_SCHEMA = 2
@@ -216,26 +225,75 @@ class Migration:
             findings.extend(file_findings)
             if new_text != text:
                 transforms[rel] = new_text
-        # Pending tasks must be implementation-ready before activation;
-        # completed tasks are historical and exempt from readiness.
+        # Independent coverage proof: count checkbox occurrences in the
+        # ORIGINAL texts (regex, parser-independent) vs canonical tasks in
+        # the transformed graph. Any loss/duplication blocks migration.
+        import tempfile
         from .readiness import validate_readiness
-        staged = Graph.__new__(Graph)
-        staged.nodes, staged.duplicates, staged.edges, staged.documents = {}, [], [], []
-        from .schema import Relation
-        for rel in sorted(texts):
-            doc = parse_text(transforms.get(rel, texts[rel]), rel)
-            staged.documents.append(doc)
-            for sec in doc.sections:
-                if sec.node_id not in staged.nodes:
-                    staged.nodes[sec.node_id] = sec
-        for sec in staged.nodes.values():
-            for rel_name, target in sec.relations():
-                staged.edges.append(Relation(sec.node_id, rel_name, target))
+        staged_texts = {rel: transforms.get(rel, texts[rel]) for rel in texts}
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            for rel, txt in staged_texts.items():
+                dest = root / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                dest.write_text(txt, encoding="utf-8")
+            staged = Graph.build(root)
         for diag in validate_readiness(staged):
             findings.append({"id": diag.node_id, "path": diag.path,
                              "finding": f"pending task is not implementation-ready "
                                         f"({diag.code}): {diag.message}"})
+        for err in staged.resolution_errors:
+            findings.append({"id": err["source"], "path": err["path"],
+                             "finding": f"unresolved/ambiguous reference {err['raw']!r}: {err['error']}"})
+        for sec in staged.duplicates:
+            findings.append({"id": sec.node_id, "path": sec.path,
+                             "finding": "duplicate canonical/local identity within the same feature; "
+                                        "resolve the conflicting legacy alias before migration"})
+        # Enrich inventory per file and build the persistent mapping.
+        entities: list[dict] = []
+        features: dict[str, str] = {}
+        total_occ = 0
+        for entry in inventory:
+            rel = entry["path"]
+            orig = parse_text(texts[rel], rel)
+            staged_doc = parse_text(staged_texts[rel], rel)
+            tasks_o = [s for s in orig.sections + orig.duplicates if s.kind == "task"]
+            feat = feature_from_path(rel)
+            if feat:
+                features[feat] = feat
+            entry.update({
+                "feature": feat,
+                "task_count": orig.task_occurrences,
+                "completed_count": sum(1 for s in tasks_o if s.status == "done"),
+                "pending_count": sum(1 for s in tasks_o if s.status != "done"),
+                "original_task_identifiers": [s.legacy_alias or s.local_id for s in tasks_o],
+                "missing_identifiers": sum(1 for s in tasks_o if s.id_missing),
+                "duplicate_local_identifiers": sorted(
+                    {s.local_id for s in tasks_o if [x.local_id for x in tasks_o].count(s.local_id) > 1}),
+                "canonical_tasks": [s.node_id for s in staged_doc.sections if s.kind == "task"],
+            })
+            total_occ += orig.task_occurrences
+        for sec in sorted(staged.nodes.values(), key=lambda s: s.node_id):
+            entities.append({"canonical_id": sec.node_id, "local_id": sec.local_id,
+                             "legacy_alias": sec.legacy_alias, "feature": sec.feature_id,
+                             "kind": sec.kind, "source_path": sec.path,
+                             "source_lines": [sec.start_line, sec.end_line],
+                             "status": sec.status})
+            if sec.feature_id:
+                features.setdefault(sec.feature_id, sec.feature_id)
+        canonical_tasks = [e for e in entities if e["kind"] == "task"]
+        if len(canonical_tasks) != total_occ:
+            findings.append({"id": "", "path": "",
+                             "finding": f"task inventory coverage mismatch: {total_occ} original "
+                                        f"task occurrences vs {len(canonical_tasks)} canonical tasks; "
+                                        f"migration must not lose or merge tasks"})
+        identity_mapping = {"version": IDENTITY_VERSION, "schema_version": "2.0",
+                            "features": dict(sorted(features.items())),
+                            "entities": entities}
         return {"inventory": inventory, "findings": findings, "transforms": transforms,
+                "identity_mapping": identity_mapping,
+                "task_occurrences": total_occ,
+                "canonical_task_count": len(canonical_tasks),
                 "already_migrated": not transforms and not findings}
 
     # ---- staged apply -----------------------------------------------------
@@ -269,8 +327,12 @@ class Migration:
             root = self.project / STATE_DIR / txn_id
         (root / "backup").mkdir(parents=True, exist_ok=True)
         (root / "staged").mkdir(parents=True, exist_ok=True)
+        _files = sorted(plan["transforms"])
+        if IDENTITY_PATH not in _files:
+            _files = sorted(_files + [IDENTITY_PATH])
         journal: dict = {"schema_version": JOURNAL_SCHEMA, "txn": txn_id,
-                         "state": "prepared", "files": sorted(plan["transforms"]),
+                         "state": "prepared", "files": _files,
+                         "identity_mapping": plan.get("identity_mapping"),
                          "file_records": [], "completed": [], "created": _now()}
         self._write_journal(root, journal)
         # Stage complete transformed artifacts; persist recovery evidence
@@ -290,10 +352,34 @@ class Migration:
             if rel in plan["transforms"]:
                 records.append({"path": rel, "backup_sha256": _sha(backup),
                                 "staged_sha256": _sha(staged)})
+        # Identity sidecar participates in staging/backup/activation/rollback.
+        _id_staged = root / "staged" / IDENTITY_PATH
+        _id_staged.parent.mkdir(parents=True, exist_ok=True)
+        _id_staged.write_text(json.dumps(plan.get("identity_mapping") or {},
+                                         indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        _fsync_file(_id_staged)
+        _id_dest = self.project / IDENTITY_PATH
+        if _id_dest.is_file():
+            _id_backup = root / "backup" / IDENTITY_PATH
+            _id_backup.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(_id_dest, _id_backup)
+            _fsync_file(_id_backup)
+            records.append({"path": IDENTITY_PATH, "backup_sha256": _sha(_id_backup),
+                            "staged_sha256": _sha(_id_staged)})
+        else:
+            records.append({"path": IDENTITY_PATH, "backup_sha256": "",
+                            "staged_sha256": _sha(_id_staged), "created": True})
         journal["file_records"] = sorted(records, key=lambda r: r["path"])
         journal["state"] = "staged"
         self._write_journal(root, journal)
         staged_graph = Graph.build(root / "staged")
+        _staged_tasks = sum(1 for s in staged_graph.nodes.values() if s.kind == "task")
+        if _staged_tasks != plan.get("task_occurrences", _staged_tasks):
+            journal["state"] = "failed"
+            journal["detail"] = (f"staged task count {_staged_tasks} does not match original "
+                                   f"inventory {plan.get('task_occurrences')}; activation refused")
+            self._write_journal(root, journal)
+            return {"status": "refused", "txn": txn_id, "detail": journal["detail"]}
         diags = validate_all(staged_graph)
         if not is_valid(diags):
             journal["state"] = "failed"
@@ -313,6 +399,7 @@ class Migration:
                 if fail_after is not None and i >= fail_after:
                     raise OSError("injected failure during activation")
                 dest = self.project / rel
+                dest.parent.mkdir(parents=True, exist_ok=True)
                 tmp = dest.with_name(dest.name + ".speckitext-tmp")
                 shutil.copyfile(root / "staged" / rel, tmp)
                 _fsync_file(tmp)
@@ -327,8 +414,7 @@ class Migration:
             try:
                 self._restore(root, journal)
                 unrestored = [r["path"] for r in journal["file_records"]
-                              if not (self.project / r["path"]).is_file()
-                              or _sha(self.project / r["path"]) != r["backup_sha256"]]
+                              if not _matches_original(self.project, r)]
             except OSError:
                 unrestored = list(journal["files"])
             if unrestored:
@@ -421,8 +507,7 @@ class Migration:
                                 "reason": journal["detail"]})
                 continue
             bad = [r["path"] for r in journal.get("file_records", [])
-                   if not (self.project / r["path"]).is_file()
-                   or _sha(self.project / r["path"]) != r["backup_sha256"]]
+                   if not _matches_original(self.project, r)]
             if bad:
                 journal["state"] = "recovery-required"
                 journal["detail"] = f"restoration did not reproduce originals for: {bad}"
@@ -464,7 +549,7 @@ class Migration:
             return ("journal file manifest does not match its hashed file records; "
                     "cannot verify safely")
         for record in records:
-            if not isinstance(record, dict) or not record.get("backup_sha256") \
+            if not isinstance(record, dict) or (not record.get("created") and not record.get("backup_sha256")) \
                     or not record.get("staged_sha256"):
                 return (f"journal record for {record.get('path') if isinstance(record, dict) else '?'} "
                         "lacks recorded hashes; cannot verify safely")
@@ -477,9 +562,11 @@ class Migration:
             return problem
         for record in journal.get("file_records", []):
             backup = root / "backup" / record["path"]
-            if not backup.is_file():
+            if record.get("created"):
+                pass  # newly created file: original state is absence
+            elif not backup.is_file():
                 return f"backup missing for {record['path']}; cannot recover safely"
-            if _sha(backup) != record.get("backup_sha256"):
+            elif _sha(backup) != record.get("backup_sha256"):
                 return (f"backup for {record['path']} does not match its journal "
                         "hash; cannot recover safely")
             if check_staged:
@@ -508,6 +595,8 @@ class Migration:
             if not staged_only:
                 expected.append({"state": "original",
                                  "sha256": record["backup_sha256"]})
+            if record.get("created") and observed is None:
+                continue
             if observed not in [e["sha256"] for e in expected]:
                 conflicts.append({
                     "path": record["path"], "observed_sha256": observed,
@@ -593,8 +682,7 @@ class Migration:
                     "detail": journal["detail"],
                     "rollback_completed": list(journal.get("rollback_completed", []))}
         unrestored = [r["path"] for r in journal.get("file_records", [])
-                      if not (self.project / r["path"]).is_file()
-                      or _sha(self.project / r["path"]) != r["backup_sha256"]]
+                      if not _matches_original(self.project, r)]
         if unrestored:
             journal["state"] = "rolling-back"
             journal["detail"] = (f"rollback did not reproduce originals for: "
@@ -619,9 +707,19 @@ class Migration:
         file is journaled before the next begins, so an interruption is
         resumable from the recorded progress.
         """
+        _created = {r["path"] for r in journal.get("file_records", []) if r.get("created")}
         for rel in journal["files"]:
             backup = root / "backup" / rel
             dest = self.project / rel
+            if rel in _created and not backup.is_file():
+                if dest.is_file():
+                    dest.unlink()
+                if progress_key:
+                    done = journal.setdefault(progress_key, [])
+                    if rel not in done:
+                        done.append(rel)
+                    self._write_journal(root, journal)
+                continue
             if not backup.is_file():
                 raise FileNotFoundError(
                     f"backup missing for {rel}; cannot restore safely")
@@ -682,6 +780,25 @@ def transform_text(text: str, rel: str, existing_ids: list[str],
                 break
         return end
 
+    _feat = feature_from_path(rel)
+    _taken: set[str] = set()
+
+    def _meta_lines(local: str, kind: str, extra: list[str] | None = None,
+                    legacy: str | None = None, missing: bool = False) -> list[str]:
+        canon = make_canonical(_feat, local, kind)
+        meta = ["<!-- speckitext", f"id: {local}", f"kind: {kind}"]
+        if canon != local:
+            meta.append(f"canonical_id: {canon}")
+        meta.append(f"local_id: {local}")
+        meta.append(f"legacy_alias: {legacy if legacy is not None else local}")
+        if _feat and kind != "constitution":
+            meta.append(f"feature: {_feat}")
+        if missing:
+            meta.append("id_missing: true")
+        meta += (extra or [])
+        meta.append("-->")
+        return meta
+
     i = 0
     while i < len(lines):
         line = lines[i]
@@ -691,40 +808,39 @@ def transform_text(text: str, rel: str, existing_ids: list[str],
             toks = ID_TOKEN_RE.findall(heading.group(2))
             if toks and kind_for_id(toks[0]):
                 kind = kind_for_id(toks[0])
-                meta = ["<!-- speckitext", f"id: {toks[0]}", f"kind: {kind}"]
-                if kind == "constitution":
-                    meta.append("applicability: GLOBAL")
-                out += meta + ["-->"]
+                local = split_canonical(toks[0])[1]
+                extra = ["applicability: GLOBAL"] if kind == "constitution" else []
+                out += _meta_lines(local, kind, extra)
             elif role is not None and len(heading.group(1)) >= 2:
                 prefix, kind = role
                 nid = _alloc_id(existing_ids, prefix)
-                meta = ["<!-- speckitext", f"id: {nid}", f"kind: {kind}"]
+                extra = []
                 if kind == "constitution":
-                    meta.append("applicability: GLOBAL")
+                    extra.append("applicability: GLOBAL")
                 elif global_consts:
-                    meta.append(f"governed_by: {', '.join(global_consts)}")
-                out += meta + ["-->"]
+                    extra.append(f"governed_by: {', '.join(global_consts)}")
+                out += _meta_lines(nid, kind, extra)
         bullet = re.match(r"^\s*-\s*\*\*((?:FR|SC)-\d{3,})\*\*", line)
-        if bullet and not has_meta_after(i) and global_consts:
-            out += ["<!-- speckitext", f"id: {bullet.group(1)}",
-                    f"kind: {kind_for_id(bullet.group(1))}",
-                    f"governed_by: {', '.join(global_consts)}", "-->"]
+        if bullet and not has_meta_after(i):
+            extra = [f"governed_by: {', '.join(global_consts)}"] if global_consts else []
+            out += _meta_lines(bullet.group(1), kind_for_id(bullet.group(1)) or "requirement", extra)
         task = re.match(r"^\s*-\s*\[[ xX]\]\s+(.*)$", line)
         if task and not has_meta_after(i):
-            toks = ID_TOKEN_RE.findall(task.group(1))
-            if toks and kind_for_id(toks[0]) == "task":
-                block = "\n".join(lines[i:block_end(i)])
-                sat = sorted({t for t in ID_TOKEN_RE.findall(block)
-                              if kind_for_id(t) in ("requirement", "success_criterion")})
-                ver = sorted({t for t in ID_TOKEN_RE.findall(block)
-                              if kind_for_id(t) == "verification"})
-                if sat:
-                    meta = ["<!-- speckitext", f"id: {toks[0]}", "kind: task",
-                            f"satisfies: {', '.join(sat)}"]
-                    if ver:
-                        meta.append(f"verified_by: {', '.join(ver)}")
-                    meta.append("-->")
-                    out += meta
+            local, missing = extract_task_local(task.group(1), {})
+            if missing:
+                local = generated_local_id(task.group(1), _taken)
+            _taken.add(local)
+            block = "\n".join(lines[i:block_end(i)])
+            sat = sorted({t for t in ID_TOKEN_RE.findall(block)
+                          if kind_for_id(t) in ("requirement", "success_criterion")})
+            ver = sorted({t for t in ID_TOKEN_RE.findall(block)
+                          if kind_for_id(t) == "verification"})
+            if sat:
+                extra = [f"satisfies: {', '.join(sat)}"]
+                if ver:
+                    extra.append(f"verified_by: {', '.join(ver)}")
+                out += _meta_lines(local, "task", extra,
+                                   legacy="" if missing else local, missing=missing)
         i += 1
     new_text = "\n".join(out)
     doc2 = parse_text(new_text, rel)

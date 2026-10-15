@@ -139,7 +139,8 @@ def cmd_validate(args) -> int:
         return 1
     graph = _graph(args)
     diags = validate_graph(graph) if args.graph_only else validate_all(graph)
-    payload = {"project": str(args.project), "nodes": len(graph.nodes),
+    payload = {"project": str(args.project), "nodes": len(dict(graph.nodes)),
+               "features": sorted({s.feature_id for s in graph.nodes.values() if s.feature_id}),
                "valid": is_valid(diags), "diagnostics": [d.to_dict() for d in diags]}
     if args.package:
         try:
@@ -161,13 +162,14 @@ def cmd_compile(args) -> int:
     graph = _graph(args)
     ids = [x.strip() for x in args.tasks.split(",") if x.strip()]
     try:
-        result = compile_context(graph, Path(args.project), ids)
+        result = compile_context(graph, Path(args.project), ids,
+                                 feature=getattr(args, "feature", None))
     except CompileError as exc:
         print(f"error: {exc}", file=sys.stderr); return 1
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(result["text"], encoding="utf-8")
-    print(json.dumps({"output": str(out), "selected": ids,
+    print(json.dumps({"output": str(out), "selected": result["meta"]["selected_tasks"], "requested": ids,
                       "included": result["meta"]["included_ids"],
                       "blocked_prerequisites": result["blocked"],
                       "package_fingerprint": result["meta"]["package_fingerprint"],
@@ -230,6 +232,9 @@ def cmd_migrate(args) -> int:
         plan = mig.plan()
         _print({"mode": "dry-run", "already_migrated": plan["already_migrated"],
                 "inventory": plan["inventory"], "findings": plan["findings"],
+                "identity_mapping": plan.get("identity_mapping"),
+                "task_occurrences": plan.get("task_occurrences"),
+                "canonical_task_count": plan.get("canonical_task_count"),
                 "files_would_change": sorted(plan["transforms"])}, True)
         return 0 if not plan["findings"] else 1
     if args.recover:
@@ -260,7 +265,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     c = sub.add_parser("compile", help="compile a task/batch-scoped context package")
     c.add_argument("--project", required=True)
-    c.add_argument("--tasks", required=True, help="comma-separated task IDs")
+    c.add_argument("--tasks", required=True, help="comma-separated task IDs (local T001 or qualified feat::T001)")
+    c.add_argument("--feature", help="feature id disambiguating local task IDs")
     c.add_argument("--output", required=True)
     c.set_defaults(fn=cmd_compile)
 

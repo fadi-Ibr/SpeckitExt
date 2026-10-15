@@ -15,9 +15,9 @@ via `speckitext doctor --json`:
 
 | Item | Value |
 |---|---|
-| SpeckitExt package | 1.1.0 |
-| Traceability schema | 1.0 |
-| Compiler | 1.1.0 |
+| SpeckitExt package | 1.2.0 |
+| Traceability schema | 2.0 |
+| Compiler | 1.2.0 |
 | Preset / extension | 1.1.0 / 1.1.0 |
 | Tested `specify` (installed) | **1.0.10**, `C:\Users\Fadi\.local\bin\specify.exe`, installed via `uv tool` (`specify-cli`) |
 | Upstream source reference | github/spec-kit `main` @ `3238fa9285694dc539aeb9829b337bfd6aed7317`, source version `1.2.1.dev0`, source-inspected 2026-10-15 for preset/extension/integration APIs |
@@ -27,6 +27,27 @@ Per-project state is recorded in `.specify/speckitext.json` at bootstrap time
 (SpeckitExt + specify versions, integrations, effective registration state,
 timestamp). Diagnosis records and reports; it never upgrades, downgrades, or
 otherwise modifies the user's Spec Kit installation.
+
+## Identity and schema compatibility (2.0)
+
+- Conventional `T001`/`FR-001`/`DEC-001` projects keep working: short IDs
+  resolve when unambiguous, and projects whose identities are already
+  unambiguous need no migration (canonical IDs are derived, not rewritten).
+- Legacy aliases are never destroyed: migration adds `canonical_id` /
+  `local_id` / `legacy_alias` / `feature` metadata beside the original ID
+  and records the complete mapping in `.speckitext/identity.json`
+  (version 1). Original task wording, completion state, and provenance
+  are preserved; relationships without textual evidence are findings,
+  not inventions.
+- Qualified references (`001-auth::FR-001`) are the explicit cross-feature
+  form. Unqualified references resolve inside the owning feature;
+  ambiguous or dangling references fail validation with alternatives.
+- Schema 1.0 context packages are incompatible with the 2.0 compiler and
+  are detected as such (`incompatible package schema version`); recompile
+  them — they are never silently reinterpreted under the new identity
+  semantics. Upgrade procedure: upgrade SpeckitExt, run
+  `speckitext validate --project .`, recompile any packages, and only run
+  `speckitext migrate --dry-run` on legacy projects that lack metadata.
 
 ## Safe upgrade procedure for Spec Kit
 

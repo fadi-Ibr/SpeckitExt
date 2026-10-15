@@ -28,7 +28,7 @@ def test_deterministic_output(project):
 def test_blocked_prerequisite(project):
     g = Graph.build(project)
     r = compile_context(g, project, ["T003"])
-    assert r["blocked"] == ["T002"]  # T002 not done
+    assert r["blocked"] == ["001-demo::T002"]  # T002 not done
 
 
 def test_batch_context_deduplicates(project):
@@ -36,7 +36,7 @@ def test_batch_context_deduplicates(project):
     r = compile_context(g, project, ["T002", "T003"])
     assert r["text"].count("### CON-001") == 1
     assert r["text"].count("**FR-001**") + r["text"].count("FR-001:") >= 1
-    assert r["meta"]["included_ids"].count("FR-001") == 1
+    assert r["meta"]["included_ids"].count("001-demo::FR-001") == 1
 
 
 def test_governance_exclusion_trace(project):
@@ -56,7 +56,7 @@ def test_stale_detection(project, tmp_path):
     spec.write_text(spec.read_text(encoding="utf-8").replace("email and password", "email, password and MFA"),
                     encoding="utf-8")
     stale = package_staleness(Graph.build(project), pkg)
-    assert [s["id"] for s in stale] == ["FR-001"]
+    assert [s["id"] for s in stale] == ["001-demo::FR-001"]
 
 
 def test_expand_records_reason(project, tmp_path):
@@ -64,7 +64,7 @@ def test_expand_records_reason(project, tmp_path):
     pkg = tmp_path / "pkg.md"
     pkg.write_text(compile_context(g, project, ["T002"])["text"], encoding="utf-8")
     r = expand_context(Graph.build(project), project, pkg, ["FR-002"], "needed for redirect target")
-    assert "FR-002" in r["meta"]["included_ids"]
+    assert "001-demo::FR-002" in r["meta"]["included_ids"]
     assert r["meta"]["expansions"][-1]["reason"] == "needed for redirect target"
 
 
@@ -72,17 +72,17 @@ def test_batch_suggest_groups_related_only(project):
     g = Graph.build(project)
     batches = suggest_batches(g)
     grouped = {frozenset(b["tasks"]) for b in batches}
-    assert frozenset({"T002", "T003"}) in grouped  # share FR-001/COMP-001 + dependency
-    assert all(not ({"T002", "T004"} <= set(b["tasks"])) for b in batches)  # unrelated not merged
-    t4 = [b for b in batches if "T004" in b["tasks"]][0]
-    assert t4["tasks"] == ["T004"]
+    assert frozenset({"001-demo::T002", "001-demo::T003"}) in grouped  # share FR-001/COMP-001 + dependency
+    assert all(not ({"001-demo::T002", "001-demo::T004"} <= set(b["tasks"])) for b in batches)  # unrelated not merged
+    t4 = [b for b in batches if "001-demo::T004" in b["tasks"]][0]
+    assert t4["tasks"] == ["001-demo::T004"]
 
 
 def test_batch_topological_order(project):
     g = Graph.build(project)
     batches = suggest_batches(g)
-    auth = [b for b in batches if "T003" in b["tasks"]][0]
-    assert auth["tasks"].index("T002") < auth["tasks"].index("T003")
+    auth = [b for b in batches if "001-demo::T003" in b["tasks"]][0]
+    assert auth["tasks"].index("001-demo::T002") < auth["tasks"].index("001-demo::T003")
 
 
 def test_batch_size_cap(project):
@@ -95,5 +95,5 @@ def test_impact_analysis(project):
     from speckitext.impact import impact_for_ids
     g = Graph.build(project)
     r = impact_for_ids(g, ["FR-001"])
-    assert {"T001", "T002", "T003", "DEC-001"} <= set(r["affected"])
-    assert "T004" not in r["affected"]
+    assert {"001-demo::T001", "001-demo::T002", "001-demo::T003", "001-demo::DEC-001"} <= set(r["affected"])
+    assert "001-demo::T004" not in r["affected"]

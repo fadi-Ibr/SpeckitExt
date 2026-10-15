@@ -33,12 +33,39 @@ and `bundles/bugfix/bundle.yml`, not from older documentation alone.
 | `batch.py` | Dependency-aware coherent batch planner |
 | `impact.py` | Reverse-closure change-impact analysis |
 | `migration.py` | Full all-or-nothing migration transactions (staging, journal, activation, rollback) |
+| `identity.py` | Canonical/feature/local/legacy identity, persisted mapping, single project-wide resolver |
 | `cli.py` | `speckitext` CLI adapter (argparse; no LLM, no network, no embeddings) |
 
 Canonical data ownership: the authored Markdown artifacts remain the only
 source of truth. The graph and every context package are derived, reproducible
 views; packages embed per-section fingerprints so staleness is detectable
 without trusting any stored index. No database, daemon, or vector store.
+
+## Identity model (schema 2.0)
+
+| Concept | Meaning | Example |
+|---|---|---|
+| Local identifier | Original ID inside its feature | `T001`, `T070E`, `G5-T1` |
+| Legacy alias | Exact original string, preserved for history | `G5-T1` |
+| Feature identity | Stable namespace from `specs/<dir>`, explicit `feature:`, or the persisted identity map | `001-auth` |
+| Canonical identity | Globally unambiguous project key | `001-auth::T001`; plain `CON-001` for global/shared |
+
+Canonical IDs depend only on (feature, local) — never on order, position,
+or completion — and a persisted `canonical_id` in section metadata wins
+over directory derivation, so a rename preserving that metadata preserves
+identity. `identity.py` holds the single `IdentityResolver` used by graph
+construction, validation, governance, compiler, batch, impact, and
+migration: same-feature resolution first, explicit `feat::ID` for
+cross-feature references, unique-global fallback only when unambiguous;
+ambiguous/unknown references are diagnostics, never first-match picks.
+Duplicate canonical IDs (equivalently, duplicate locals inside one
+feature) are errors; duplicate locals across features are valid.
+Graph nodes are keyed by canonical ID (`Graph.nodes`), with a read-only
+unambiguous-local fallback for short single-feature lookups. Migration
+persists the auditable, reversible, versioned mapping in
+`.speckitext/identity.json`, staged/backed-up/rolled back with the
+transaction; inventory counts original checkbox occurrences independently
+of the parser and requires equality with canonical task count.
 
 ## ID and relation schema
 

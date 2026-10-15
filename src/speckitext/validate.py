@@ -9,8 +9,18 @@ from .schema import (APPLICABILITIES, RELATION_RULES, Diagnostic, kind_for_id, v
 def validate_graph(graph: Graph) -> list[Diagnostic]:
     d: list[Diagnostic] = []
     for sec in graph.duplicates:
-        d.append(Diagnostic("DUPLICATE_ID", "duplicate identifier in namespace",
+        # Same canonical = duplicate canonical; same feature+local with a
+        # different canonical = conflicting legacy alias in one feature.
+        d.append(Diagnostic("DUPLICATE_ID",
+                            "duplicate canonical identifier (same feature+local identity)",
                             sec.node_id, sec.path))
+    # Conflicting legacy alias: one feature+local claimed by 2 canonicals is
+    # already in duplicates; also flag a local reused with explicit conflict.
+    for err in getattr(graph, "resolution_errors", []) or []:
+        msg = str(err.get("error", ""))
+        code = "AMBIGUOUS_REFERENCE" if "ambiguous" in msg else "UNRESOLVED_REFERENCE"
+        d.append(Diagnostic(code, f"{err.get('relation')} reference cannot be resolved: {msg}",
+                            str(err.get("source", "")), str(err.get("path", ""))))
     for sec in graph.nodes.values():
         if not valid_id(sec.node_id, sec.kind):
             d.append(Diagnostic("INVALID_ID",
@@ -36,12 +46,13 @@ def validate_graph(graph: Graph) -> list[Diagnostic]:
             d.append(Diagnostic("INVALID_RELATION_DIRECTION",
                 f"{e.relation} must target {sorted(allowed_tgt)}, got {tgt.kind}",
                 e.source, src.path))
-        # Cross-feature: tasks may only satisfy/implement same-feature requirements
-        # unless the requirement explicitly declares feature: shared.
-        if e.relation in ("satisfies", "implements") and src.feature and tgt.feature \
-                and src.feature != tgt.feature and tgt.feature != "shared":
+        # Cross-feature: feature-local targets in another feature require an
+        # explicitly qualified reference (feat::ID) or a shared/global target.
+        if src.feature_id and tgt.feature_id and src.feature_id != tgt.feature_id \
+                and tgt.feature_id not in ("shared", "global") and not e.explicit:
             d.append(Diagnostic("CROSS_FEATURE_REFERENCE",
-                f"crosses feature boundary {src.feature} -> {tgt.feature}",
+                f"unqualified reference crosses feature boundary {src.feature_id} -> {tgt.feature_id}; "
+                f"qualify as {tgt.node_id}",
                 e.source, src.path))
     for cyc in graph.find_cycles():
         d.append(Diagnostic("DEPENDENCY_CYCLE",

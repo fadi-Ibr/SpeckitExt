@@ -69,7 +69,7 @@ def test_incomplete_migration_refused(tmp_path):
     tasks.write_text(tasks.read_text(encoding="utf-8") +
                      "\n- [ ] T009 Mystery task with no requirement evidence\n", encoding="utf-8")
     plan = Migration(root).plan()
-    assert any(f["id"] == "T009" for f in plan["findings"])
+    assert any(f["id"] == "001-legacy::T009" for f in plan["findings"])
     result = Migration(root).apply()
     assert result["status"] == "refused"
     assert "speckitext" not in tasks.read_text(encoding="utf-8")  # nothing activated

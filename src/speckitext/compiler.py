@@ -32,6 +32,46 @@ class CompileError(ValueError):
     pass
 
 
+def resolve_selection(graph: Graph, task_ids: list[str],
+                      feature: str | None = None) -> list[str]:
+    """Resolve short/qualified task selections to canonical IDs.
+
+    A qualified ``feat::T001`` always resolves deterministically; a local
+    ``T001`` resolves only with a feature context or when unambiguous.
+    Ambiguity raises with the qualified alternatives (never picks one)."""
+    out: list[str] = []
+    for raw in task_ids:
+        raw = str(raw).strip()
+        try:
+            canon = graph.resolve(raw, feature or "")
+        except Exception as exc:
+            cands = graph.candidates(raw) if graph.resolver else []
+            if cands:
+                raise CompileError(
+                    f"ambiguous task id {raw!r}; qualify one of: {', '.join(cands)} "
+                    f"(or pass --feature <feature-id>)") from exc
+            raise CompileError(f"unknown task id: {raw}") from exc
+        sec = graph.nodes.get(canon)
+        if sec is None:
+            raise CompileError(f"unknown task id: {raw}")
+        if sec.kind != "task":
+            raise CompileError(f"id {raw} ({canon}) is kind {sec.kind}, not a task")
+        if canon not in out:
+            out.append(canon)
+    return sorted(out)
+
+
+def _resolve_any(graph: Graph, ref: str, feature: str = "") -> str:
+    try:
+        return graph.resolve(ref, feature)
+    except Exception as exc:
+        cands = graph.candidates(ref) if graph.resolver else []
+        if cands:
+            raise CompileError(
+                f"ambiguous id {ref!r}; qualify one of: {', '.join(cands)}") from exc
+        raise CompileError(f"unknown section id: {ref}") from exc
+
+
 def resolve_inclusion(graph: Graph, task_ids: list[str],
                       extra_ids: list[str] | None = None) -> dict:
     """Canonical inclusion resolution shared by compile and freshness checks.
@@ -40,16 +80,12 @@ def resolve_inclusion(graph: Graph, task_ids: list[str],
     prerequisites, and governance traces for `task_ids` plus any explicitly
     approved non-task `extra_ids` (context expansions).
     """
-    task_ids = sorted(set(task_ids))
+    task_ids = resolve_selection(graph, list(task_ids))
     for tid in task_ids:
         sec = graph.nodes.get(tid)
-        if sec is None:
-            raise CompileError(f"unknown task id: {tid}")
-        if sec.kind != "task":
-            raise CompileError(f"id {tid} is kind {sec.kind}, not a task")
-    extra_ids = sorted(set(extra_ids or []))
+    extra_ids = sorted({_resolve_any(graph, x) for x in (extra_ids or [])})
     for nid in extra_ids:
-        if nid not in graph.nodes:
+        if graph.nodes.get(nid) is None:
             raise CompileError(f"unknown section id: {nid}")
         if graph.nodes[nid].kind == "task":
             raise CompileError(
@@ -99,8 +135,9 @@ def resolve_inclusion(graph: Graph, task_ids: list[str],
 
 def compile_context(graph: Graph, project: Path, task_ids: list[str],
                     expanded: list[dict] | None = None,
-                    extra_ids: list[str] | None = None) -> dict:
-    task_ids = sorted(set(task_ids))
+                    extra_ids: list[str] | None = None,
+                    feature: str | None = None) -> dict:
+    task_ids = resolve_selection(graph, list(task_ids), feature)
     diags = validate_all(graph)
     errors = [x for x in diags if x.severity == "error"]
     if errors:
@@ -109,6 +146,10 @@ def compile_context(graph: Graph, project: Path, task_ids: list[str],
     expanded = list(expanded or [])
     if extra_ids is None:
         extra_ids = [str(e["id"]) for e in expanded if isinstance(e, dict) and "id" in e]
+    _feat = feature or (graph.nodes[task_ids[0]].feature_id if task_ids else "")
+    extra_ids = [_resolve_any(graph, x, _feat) for x in extra_ids]
+    expanded = [{**e, "id": _resolve_any(graph, str(e["id"]), _feat)}
+                if isinstance(e, dict) and "id" in e else e for e in expanded]
     inc = resolve_inclusion(graph, task_ids, extra_ids)
     ordered, prereqs, blocked = inc["ordered"], inc["prerequisites"], inc["blocked"]
     task_set = set(task_ids)
@@ -129,7 +170,11 @@ def compile_context(graph: Graph, project: Path, task_ids: list[str],
         refs.append(sec.to_ref(reason))
     meta = {
         "schema_version": SCHEMA_VERSION, "compiler_version": COMPILER_VERSION,
+        "identity": [{"canonical_id": graph.nodes[n].node_id, "local_id": graph.nodes[n].local_id,
+                      "legacy_alias": graph.nodes[n].legacy_alias, "feature": graph.nodes[n].feature_id}
+                     for n in ordered],
         "selected_tasks": sorted(task_ids),
+        "selected_local_ids": sorted(graph.nodes[n].local_id for n in task_ids),
         "prerequisites": prereqs, "blocked_prerequisites": blocked,
         "included_ids": ordered, "source_refs": refs,
         "governance_included": inc["governance_included"],
@@ -369,8 +414,9 @@ def expand_context(graph: Graph, project: Path, package_path: Path,
         raise CompileError(
             "cannot expand a stale package; recompile it first: " +
             "; ".join(f"{s.get('id') or 'package'}: {s['reason']}" for s in stale[:8]))
+    add_ids = [_resolve_any(graph, x) for x in add_ids]
     for nid in add_ids:
-        if nid not in graph.nodes:
+        if graph.nodes.get(nid) is None:
             raise CompileError(f"cannot expand: unknown id {nid}")
         if graph.nodes[nid].kind == "task":
             raise CompileError(
@@ -389,5 +435,5 @@ def expand_context(graph: Graph, project: Path, package_path: Path,
         seen.add(key)
         merged.append({"id": key, "reason": str(entry.get("reason", reason))})
     extra_ids = [e["id"] for e in merged
-                 if e["id"] in graph.nodes and graph.nodes[e["id"]].kind != "task"]
+                 if graph.nodes.get(e["id"]) is not None and graph.nodes[e["id"]].kind != "task"]
     return compile_context(graph, project, selected, expanded=merged, extra_ids=extra_ids)

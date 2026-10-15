@@ -71,7 +71,11 @@ def suggest_batches(graph: Graph, max_tasks: int = 5, max_context_chars: int = 6
             blocked_by = sorted({d for m in chunk for d in graph.targets(m, "depends_on")
                                    if d not in chunk and graph.nodes.get(d) is not None
                                    and graph.nodes[d].status != "done"})
-            batches.append({"tasks": chunk, "reasons": reasons,
+            batches.append({"tasks": chunk,
+                            "task_details": [{"canonical_id": m, "local_id": graph.nodes[m].local_id,
+                                              "legacy_alias": graph.nodes[m].legacy_alias,
+                                              "feature": graph.nodes[m].feature_id} for m in chunk],
+                            "reasons": reasons,
                             "blocked_by": blocked_by,
                             "shared_context": shared_comps,
                             "estimated_chars": sum(len(graph.nodes[m].content) for m in chunk)})

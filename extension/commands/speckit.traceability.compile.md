@@ -8,7 +8,7 @@ description: Compile a task/batch-scoped context package
 $ARGUMENTS
 ```
 
-The input names task IDs (e.g. `T003` or `T003,T004`). Run
+The input names task IDs (e.g. `T003` or `T003,T004`; multi-feature: qualified `001-feature::T003` or `--feature <feature-id>` with a local ID). Run
 `speckitext validate --project .`, then
 `speckitext compile --project . --tasks <IDs> --output .specify/context/<selection>.md`.
 Report the included IDs, blocked prerequisites, and package fingerprint. Load
