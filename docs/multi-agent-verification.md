@@ -33,3 +33,7 @@ Notes:
   isolated home directory (owned files removed, unrelated and user-modified
   files preserved), and the live install on this machine preserved all
   pre-existing user skills (find-skills, frontend-design, playwright, .system).
+
+## Authoritative E2E acceptance (1.1.1)
+
+The gated real-agent test (`SPECKITEXT_AGENT_E2E=1`) selects greet work by requirement/component traceability, asserts expected source/test files exist, executes the greeting behavior and pytest, requires selected tasks done and unrelated tasks pending, and revalidates the graph. Absent files, absent tests, incomplete tasks, or a zero-exit no-op agent all fail; `tests/test_e2e_acceptance_negative.py` proves a no-op cannot pass in normal CI. Registration checks require the full scoped contract (doctor+validate+compile+expand, no broad loading); merely mentioning `speckitext compile` classifies as `partial`. Installed/discoverable/active-override/execution-verified remain distinct levels; no Kimi live execution is claimed without provider access.

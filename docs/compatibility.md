@@ -51,3 +51,7 @@ When classification is `unsupported`, or a project's effective
 the precise diagnostic and exits non-zero; the implementation command instructs
 agents to stop and report rather than fall back to upstream's broad-loading
 workflow.
+
+## Version policy (1.1.1)
+
+Only versions in `TESTED_SPECIFY_VERSIONS` (currently specify-cli 1.0.10) are *verified*. Untested/unknown versions permit read-only `speckitext doctor` diagnosis but bootstrap/registration refuses them without explicit `--allow-untested-specify` confirmation; below-floor versions are refused outright. Doctor exits nonzero when any recorded project integration lacks a verified scoped override, or the global install manifest is corrupt.

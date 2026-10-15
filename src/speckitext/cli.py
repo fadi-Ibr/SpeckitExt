@@ -21,13 +21,26 @@ def cmd_doctor(args) -> int:
     from .registration import registration_status
     report: dict = {"speckitext": speckitext_info(), "specify": specify_info(),
                     "agents": agent_info()}
-    healthy = report["specify"]["classification"] in ("tested-compatible", "untested")
+    # Only a tested-compatible specify is verified; untested/unknown versions
+    # permit this read-only diagnosis but are never presented as verified.
+    healthy = report["specify"]["classification"] == "tested-compatible"
+    report["specify_verified"] = healthy
     if args.global_scope:
         report["global"] = global_status(Path(args.home) if args.home else None)
+        if report["global"].get("manifest_corrupt"):
+            healthy = False
     if args.project:
         report["project"] = project_metadata(Path(args.project))
         report["registration"] = registration_status(Path(args.project))["integrations"]
-        if not any(v["override_active"] for v in report["registration"].values()):
+        recorded = (report["project"].get("recorded") or {}).get("integrations")
+        required = [str(x) for x in recorded] if recorded else list(report["registration"])
+        report["required_integrations"] = required
+        report["registration_diagnostics"] = {
+            k: report["registration"][k]["diagnostic"] for k in required
+            if k in report["registration"]
+            and not report["registration"][k]["override_active"]}
+        if not all(report["registration"].get(k, {}).get("override_active")
+                   for k in required):
             healthy = False
     report["healthy"] = healthy
     if args.json:
@@ -76,11 +89,13 @@ def cmd_bootstrap(args) -> int:
         if args.integrations else DEFAULT_INTEGRATIONS
     try:
         result = bootstrap_project(Path(args.project), integrations,
-                                   args.preset_dir, args.extension_dir)
+                                   args.preset_dir, args.extension_dir,
+                                   allow_existing=args.allow_existing,
+                                   allow_untested_specify=args.allow_untested_specify)
     except (ValueError, FileNotFoundError) as exc:
         print(f"error: {exc}", file=sys.stderr); return 2
     _print(result, True)
-    return 0 if result["status"].startswith("bootstrapped") else 1
+    return 0 if result["status"] == "bootstrapped" else 1
 
 
 def _graph(args) -> Graph:
@@ -93,6 +108,12 @@ def _print(data, as_json: bool) -> None:
 
 
 def cmd_validate(args) -> int:
+    from .migration import migration_block
+    block = migration_block(Path(args.project))
+    if block:
+        _print({"project": str(args.project), "valid": False,
+                "migration_state": block, "diagnostics": []}, True)
+        return 1
     graph = _graph(args)
     diags = validate_graph(graph) if args.graph_only else validate_all(graph)
     payload = {"project": str(args.project), "nodes": len(graph.nodes),
@@ -104,11 +125,19 @@ def cmd_validate(args) -> int:
             payload["package_fresh"] = not stale
         except CompileError as exc:
             payload["package_error"] = str(exc)
+            payload["package_fresh"] = False
     _print(payload, True)
-    return 0 if payload["valid"] and payload.get("package_fresh", True) else 1
+    return 0 if payload["valid"] and payload.get("package_fresh", True) \
+        and "package_error" not in payload else 1
 
 
 def cmd_compile(args) -> int:
+    from .migration import migration_block
+    block = migration_block(Path(args.project))
+    if block:
+        print(f"error: {block['detail']} Recovery: {block['recovery_command']}",
+              file=sys.stderr)
+        return 1
     graph = _graph(args)
     ids = [x.strip() for x in args.tasks.split(",") if x.strip()]
     try:
@@ -174,8 +203,12 @@ def cmd_migrate(args) -> int:
                 "inventory": plan["inventory"], "findings": plan["findings"],
                 "files_would_change": sorted(plan["transforms"])}, True)
         return 0 if not plan["findings"] else 1
+    if args.recover:
+        result = mig.recover()
+        _print(result, True)
+        return 0 if result["status"] in ("recovered", "nothing-to-recover") else 1
     if args.rollback:
-        result = mig.rollback(args.txn)
+        result = mig.rollback(args.txn, force=args.force_rollback)
         _print(result, True)
         return 0 if result["status"] in ("rolled-back",) else 1
     result = mig.apply(fail_after=args.fail_after)
@@ -229,6 +262,10 @@ def build_parser() -> argparse.ArgumentParser:
     mg.add_argument("--dry-run", action="store_true")
     mg.add_argument("--apply", action="store_true")
     mg.add_argument("--rollback", action="store_true")
+    mg.add_argument("--recover", action="store_true",
+                    help="restore an interrupted migration to its originals")
+    mg.add_argument("--force-rollback", action="store_true",
+                    help="explicitly overwrite post-activation edits on rollback")
     mg.add_argument("--txn", help="transaction id for rollback")
     mg.add_argument("--fail-after", type=int, help=argparse.SUPPRESS)
     mg.set_defaults(fn=cmd_migrate)
@@ -258,14 +295,18 @@ def build_parser() -> argparse.ArgumentParser:
     bo.add_argument("--integrations", help="comma-separated: claude,codex,kimi,muse")
     bo.add_argument("--preset-dir")
     bo.add_argument("--extension-dir")
+    bo.add_argument("--allow-existing", action="store_true",
+                    help="explicitly authorize bootstrap in an existing nonempty directory")
+    bo.add_argument("--allow-untested-specify", action="store_true",
+                    help="explicitly confirm bootstrap with an untested specify version")
     bo.set_defaults(fn=cmd_bootstrap)
     return p
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if getattr(args, "command", None) == "migrate" and not (args.dry_run or args.apply or args.rollback):
-        print("error: migrate requires one of --dry-run, --apply, --rollback", file=sys.stderr)
+    if getattr(args, "command", None) == "migrate" and not (args.dry_run or args.apply or args.rollback or args.recover):
+        print("error: migrate requires one of --dry-run, --apply, --rollback, --recover", file=sys.stderr)
         return 2
     return args.fn(args)
 

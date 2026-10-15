@@ -132,6 +132,12 @@ def target_files(home: Path | None = None) -> list[dict]:
 
 def install_global(home: Path | None = None, force: bool = False) -> dict:
     manifest = _load_manifest(home)
+    if manifest.get("corrupt"):
+        return {"status": "error", "installed": [], "unchanged": [], "conflicts": [],
+                "detail": f"install manifest {_manifest_path(home)} is corrupt; "
+                          "ownership information is preserved and nothing was "
+                          "changed. Repair or remove the manifest explicitly "
+                          "before reinstalling."}
     owned = {e["path"]: e for e in manifest.get("files", [])}
     installed, conflicts, unchanged = [], [], []
     new_files: list[dict] = []
@@ -172,6 +178,11 @@ def install_global(home: Path | None = None, force: bool = False) -> dict:
 
 def uninstall_global(home: Path | None = None, force: bool = False) -> dict:
     manifest = _load_manifest(home)
+    if manifest.get("corrupt"):
+        return {"status": "error", "removed": [], "kept": [], "missing": [],
+                "detail": f"install manifest {_manifest_path(home)} is corrupt; "
+                          "ownership cannot be established, so nothing was "
+                          "removed. Repair the manifest explicitly first."}
     removed, kept, missing = [], [], []
     remaining: list[dict] = []
     for entry in manifest.get("files", []):
@@ -210,4 +221,4 @@ def global_status(home: Path | None = None) -> dict:
         for agent in entry["agents"]:
             per_agent[agent] = dict(status)
     return {"manifest": str(_manifest_path(home)), "version": manifest.get("version"),
-            "agents": per_agent}
+            "manifest_corrupt": bool(manifest.get("corrupt")), "agents": per_agent}

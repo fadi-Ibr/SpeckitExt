@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "speckitext"
-version = "1.1.0"
+version = "1.1.1"
 description = "Traceability-aware planning preset tooling and deterministic task/batch-scoped context compiler for GitHub Spec Kit"
 readme = "README.md"
 requires-python = ">=3.11"

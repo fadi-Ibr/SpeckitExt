@@ -3,7 +3,7 @@ schema_version: "1.0"
 extension:
   id: "traceability"
   name: "SpeckitExt Traceability Context"
-  version: "1.1.0"
+  version: "1.1.1"
   description: "Deterministic traceability graph validation, batch planning, scoped context compilation, impact analysis, and full migration"
   author: "SpeckitExt"
   repository: "https://github.com/fadi-Ibr/SpeckitExt"

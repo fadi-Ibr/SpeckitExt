@@ -20,11 +20,17 @@ LEGACY_SPEC = """# Feature Specification: Legacy Demo
 LEGACY_TASKS = """# Tasks: Legacy Demo
 
 ### VER-001: Legacy checks
-Run the legacy test suite.
+Run: pytest tests/ -q
 
 - [x] T001 Login form for FR-001 verified by VER-001
 - [ ] T002 Login endpoint for FR-001 verified by VER-001 (depends on T001)
+  Objective: Login endpoint accepts valid credentials and returns a session
+  Scope: specs/001-legacy/tasks.md implementation in src/auth.py
+  Accept: valid login succeeds and invalid login is rejected
 - [ ] T003 Dashboard for FR-002 verified by VER-001
+  Objective: Dashboard page renders for a logged-in user
+  Scope: src/ui.py
+  Accept: authenticated user sees the dashboard content
 """
 
 

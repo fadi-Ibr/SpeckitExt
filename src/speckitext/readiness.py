@@ -47,9 +47,17 @@ def verification_is_executable(content: str) -> bool:
     return bool(_COMMAND_RE.search(body))
 
 
-def validate_readiness(graph: Graph) -> list[Diagnostic]:
+def validate_readiness(graph: Graph, *, pending_only: bool = True) -> list[Diagnostic]:
+    """Readiness for actionable tasks.
+
+    Completed (done) tasks are historical records: they keep full graph
+    traceability but are not re-checked for actionability, so migrated
+    history never has to pretend it needs reimplementation. Pending tasks
+    must be implementation-ready.
+    """
     d: list[Diagnostic] = []
-    for sec in sorted((s for s in graph.nodes.values() if s.kind == "task"),
+    for sec in sorted((s for s in graph.nodes.values() if s.kind == "task"
+                       and not (pending_only and s.status == "done")),
                       key=lambda s: s.node_id):
         content = sec.content
         objective = _field(content, "Objective")

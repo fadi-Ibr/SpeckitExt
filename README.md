@@ -195,3 +195,10 @@ git diff --check
 Migration was verified only against synthetic legacy fixtures in disposable
 directories. **No existing real project was migrated or used for migration
 testing.**
+
+## 1.1.1 corrective guarantees
+
+- **Package freshness** is checked against the context resolved from the *current* graph (selection, dependency closure, applicable GLOBAL/SCOPED/CONDITIONAL governance, traceability/contract/verification closure, source fingerprints, compiler/schema versions, approved expansions) plus the package's own content fingerprint. A new applicable rule or changed relationship invalidates old packages; malformed/incompatible packages make `speckitext validate --package` exit nonzero.
+- **Expansion** (`speckitext expand`) re-renders through the canonical compiler, records deduplicated reasons, never adds tasks as executable work, and refuses stale/corrupt packages.
+- **Migration** is a durable transaction (prepared -> staged -> activating -> activated; `--recover` restores byte-exact originals after interruption; rollback refuses to overwrite post-activation edits unless `--force-rollback`). Incomplete migrations block validate/compile. Pending tasks must be implementation-ready; completed tasks remain historical traceability.
+- **Bootstrap** refuses existing nonempty non-Spec-Kit directories by default, never uses `--force` on init, stops at the first failed mandatory step, and reports `partial` (nonzero exit) unless every requested integration has a verified scoped override. Doctor requires *every recorded* integration to be active and only calls tested-compatible Spec Kit versions verified.

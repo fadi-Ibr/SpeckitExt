@@ -73,3 +73,7 @@ full, all-or-nothing migration (`speckitext migrate --dry-run` review, then
 - Codex has no non-destructive user-skill listing command; its discovery is
   verified by directory convention plus observed skill enumeration in
   `codex debug prompt-input`, not by a dedicated list API.
+
+## Installer integrity (1.1.1)
+
+A corrupt `~/.speckitext/install.json` is preserved and reported (`manifest_corrupt`); install/uninstall refuse to act rather than discarding ownership and replacing or removing files destructively. Bootstrap into an existing nonempty directory requires a new/empty directory, an empty Git repository, an established Spec Kit shape, or explicit `--allow-existing` authorization.

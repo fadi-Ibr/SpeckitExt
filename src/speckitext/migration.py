@@ -1,19 +1,30 @@
 """Full, all-or-nothing migration of legacy Spec Kit projects.
 
-Transaction layout (under the project, never touching sources until activation):
+Durable transaction state machine (journal schema 2):
+
+    prepared -> staged -> activating -> activated
+    any non-terminal state --recover()--> recovered
+    activated --rollback()--> rolled-back
+    in-process activation failure -> failed (originals already restored)
+
+Transaction layout (kept separate from authored content):
 
     .speckitext/migrations/<txn-id>/
-        journal.json     state machine: prepared -> staged -> activated | rolled-back | failed
-        backup/<relpath> byte-exact originals of every file activation will touch
-        staged/<relpath> fully transformed copies; the staged tree is validated
-                         as a complete project before activation is allowed
+        journal.json     state, per-file backup/staged SHA-256 manifest
+        backup/<relpath> byte-exact originals of every file activation touches
+        staged/<relpath> fully transformed copies, validated as a complete
+                         project (graph + pending-task readiness) before
+                         activation is allowed
 
-Activation copies staged files over the originals one by one, journaling each
-step. Any failure (including an injected one) restores every touched file from
-backup and marks the transaction failed. Rollback restores an activated
-transaction from its backups. Re-running apply on an already-migrated project
-is a no-op. Incomplete migrations (findings that block validation) can never
-activate: the staged graph must validate clean first.
+Filesystem multi-file replacement is not atomic, so this module provides
+recoverable logical atomicity: recovery evidence (backups + hashed journal)
+is persisted and fsynced before any project file is replaced, the journal is
+advanced after every replacement, and an interruption that lands between a
+replacement and its journal update is reconciled on recovery by comparing
+current file hashes against the backup/staged manifest. A project with a
+non-terminal transaction is blocked from use until `recover()` restores the
+byte-exact originals. Rollback refuses to overwrite files edited after
+activation unless an explicit forced resolution is requested.
 """
 from __future__ import annotations
 
@@ -24,13 +35,29 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .fingerprint import fingerprint_bytes
 from .graph import Graph
 from .parsing import parse_text
 from .project import discover_files
 from .schema import ID_TOKEN_RE, kind_for_id
-from .validate import is_valid, validate_graph
+from .validate import is_valid, validate_all, validate_graph
 
 STATE_DIR = ".speckitext/migrations"
+JOURNAL_SCHEMA = 2
+TERMINAL_STATES = ("activated", "rolled-back", "recovered", "failed")
+INCOMPLETE_STATES = ("prepared", "staged", "activating", "recovery-required")
+
+# ID-less headings in these files gain deterministic IDs of the mapped kind.
+_HEADING_ID_ROLES = {
+    "constitution.md": ("CON", "constitution"),
+    "plan.md": ("DEC", "decision"),
+    "data-model.md": ("DM", "data_model"),
+    "research.md": ("RES", "research"),
+}
+
+
+class MigrationCrash(BaseException):
+    """Simulated process death during activation (never caught in-process)."""
 
 
 def _now() -> str:
@@ -46,6 +73,89 @@ def _next_id(existing: list[str], prefix_pattern: str, fmt: str) -> str:
     return fmt.format((max(nums) + 1) if nums else 1)
 
 
+def _alloc_id(existing: list[str], prefix: str) -> str:
+    nums = [int(m.group(1)) for e in existing
+            if (m := re.fullmatch(re.escape(prefix) + r"-(\d+)", e))]
+    nid = f"{prefix}-{(max(nums) + 1) if nums else 1:03d}"
+    existing.append(nid)
+    return nid
+
+
+def _fsync_file(path: Path) -> None:
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _fsync_dir(path: Path) -> None:
+    try:
+        fd = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(fd)
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _sha(path: Path) -> str:
+    return fingerprint_bytes(path.read_bytes())
+
+
+def incomplete_migrations(project: Path) -> list[dict]:
+    """Non-terminal (or unreadable) migration transactions blocking use."""
+    base = Path(project) / STATE_DIR
+    out: list[dict] = []
+    if not base.is_dir():
+        return out
+    for root in sorted(p for p in base.glob("*") if p.is_dir()):
+        journal_path = root / "journal.json"
+        if not journal_path.is_file():
+            out.append({"txn": root.name, "state": "recovery-required",
+                        "reason": "journal.json missing; transaction state unknown",
+                        "recovery": "inspect .speckitext/migrations and restore "
+                                    "from backup/ manually, then remove the "
+                                    "transaction directory"})
+            continue
+        try:
+            journal = json.loads(journal_path.read_text(encoding="utf-8"))
+        except ValueError:
+            out.append({"txn": root.name, "state": "recovery-required",
+                        "reason": "journal.json is corrupt (invalid JSON)",
+                        "recovery": "restore project files from the transaction "
+                                    "backup/ directory, then remove the "
+                                    "transaction directory"})
+            continue
+        state = journal.get("state", "")
+        if state not in TERMINAL_STATES:
+            out.append({"txn": journal.get("txn", root.name), "state": state,
+                        "reason": f"migration transaction is {state or 'in an unknown state'}, not activated",
+                        "recovery": "run `speckitext migrate --project . --recover`"})
+    return out
+
+
+def migration_block(project: Path) -> dict | None:
+    """Recovery-required diagnostic if the project is partially migrated."""
+    incomplete = incomplete_migrations(project)
+    if not incomplete:
+        return None
+    return {"status": "recovery-required", "incomplete": incomplete,
+            "detail": "project has an incomplete migration and must not be "
+                      "used until recovered: " +
+                      "; ".join(f"{i['txn']} ({i['state']}): {i['reason']}"
+                                for i in incomplete),
+            "recovery_command": "speckitext migrate --project . --recover"}
+
+
 class Migration:
     def __init__(self, project: Path):
         self.project = Path(project)
@@ -54,42 +164,85 @@ class Migration:
     def plan(self) -> dict:
         """Dry-run: inventory, proposed transformations, findings. Writes nothing."""
         files = discover_files(self.project)
-        # Project-wide evidence first: constitution rules govern requirements by
-        # definition, so GLOBAL constitution IDs are the governed_by source.
-        global_consts: list[str] = []
+        texts: dict[str, str] = {}
         for p in files:
-            rel0 = p.resolve().relative_to(self.project.resolve()).as_posix()
-            for sec in parse_text(p.read_text(encoding="utf-8"), rel0).sections:
+            rel = p.resolve().relative_to(self.project.resolve()).as_posix()
+            texts[rel] = p.read_text(encoding="utf-8")
+        # Constitution first: its (possibly newly assigned) GLOBAL rules are
+        # the governed_by source for requirements in every other file.
+        global_consts: list[str] = []
+        pre_transformed: dict[str, str] = {}
+        existing_ids: list[str] = []
+        for rel, text in texts.items():
+            for sec in parse_text(text, rel).sections:
+                existing_ids.append(sec.node_id)
+        for rel in sorted(texts):
+            if Path(rel).name != "constitution.md":
+                continue
+            new_text, _ = transform_text(texts[rel], rel, existing_ids, [])
+            pre_transformed[rel] = new_text
+            for sec in parse_text(new_text, rel).sections:
                 if sec.kind == "constitution" and \
                         str(sec.meta.get("applicability", "GLOBAL")).upper() == "GLOBAL":
                     global_consts.append(sec.node_id)
         global_consts = sorted(set(global_consts))
+
         inventory, findings, transforms = [], [], {}
-        existing_ids: list[str] = []
         for p in files:
             rel = p.resolve().relative_to(self.project.resolve()).as_posix()
-            text = p.read_text(encoding="utf-8")
+            text = texts[rel]
             doc = parse_text(text, rel)
-            existing_ids.extend(s.node_id for s in doc.sections)
-            new_text, file_findings = transform_text(text, rel, existing_ids, global_consts)
+            if rel in pre_transformed:
+                new_text, file_findings = pre_transformed[rel], []
+                # Recompute findings for the constitution from its transform.
+                _, file_findings = transform_text(text, rel, list(existing_ids), global_consts)
+                new_text = pre_transformed[rel]
+            else:
+                new_text, file_findings = transform_text(text, rel, existing_ids, global_consts)
             existing_ids.extend(ID_TOKEN_RE.findall(new_text))
             inventory.append({"path": rel, "sections": [s.node_id for s in doc.sections],
                               "would_change": new_text != text})
             findings.extend(file_findings)
             if new_text != text:
                 transforms[rel] = new_text
+        # Pending tasks must be implementation-ready before activation;
+        # completed tasks are historical and exempt from readiness.
+        from .readiness import validate_readiness
+        staged = Graph.__new__(Graph)
+        staged.nodes, staged.duplicates, staged.edges, staged.documents = {}, [], [], []
+        from .schema import Relation
+        for rel in sorted(texts):
+            doc = parse_text(transforms.get(rel, texts[rel]), rel)
+            staged.documents.append(doc)
+            for sec in doc.sections:
+                if sec.node_id not in staged.nodes:
+                    staged.nodes[sec.node_id] = sec
+        for sec in staged.nodes.values():
+            for rel_name, target in sec.relations():
+                staged.edges.append(Relation(sec.node_id, rel_name, target))
+        for diag in validate_readiness(staged):
+            findings.append({"id": diag.node_id, "path": diag.path,
+                             "finding": f"pending task is not implementation-ready "
+                                        f"({diag.code}): {diag.message}"})
         return {"inventory": inventory, "findings": findings, "transforms": transforms,
                 "already_migrated": not transforms and not findings}
 
     # ---- staged apply -----------------------------------------------------
-    def apply(self, fail_after: int | None = None) -> dict:
+    def apply(self, fail_after: int | None = None,
+              crash_after: int | None = None) -> dict:
+        block = migration_block(self.project)
+        if block:
+            return {"status": "recovery-required", "detail": block["detail"],
+                    "incomplete": block["incomplete"],
+                    "recovery_command": block["recovery_command"]}
         plan = self.plan()
         if plan["already_migrated"]:
             graph = Graph.build(self.project)
-            if is_valid(validate_graph(graph)):
+            if is_valid(validate_all(graph)):
                 return {"status": "noop", "detail": "already migrated and valid; nothing to do"}
             return {"status": "refused",
-                    "detail": "project carries traceability metadata but graph is invalid; fix findings first",
+                    "detail": "project carries traceability metadata but the graph "
+                              "is not implementation-ready; fix findings first",
                     "findings": plan["findings"]}
         if plan["findings"]:
             return {"status": "refused",
@@ -97,68 +250,200 @@ class Migration:
                     "findings": plan["findings"]}
         txn_id = _now()
         root = self.project / STATE_DIR / txn_id
+        if root.exists():  # same-second rerun: keep transaction ids unique
+            suffix = 1
+            while (self.project / STATE_DIR / f"{txn_id}-{suffix}").exists():
+                suffix += 1
+            txn_id = f"{txn_id}-{suffix}"
+            root = self.project / STATE_DIR / txn_id
         (root / "backup").mkdir(parents=True, exist_ok=True)
         (root / "staged").mkdir(parents=True, exist_ok=True)
-        journal = {"txn": txn_id, "state": "prepared", "files": sorted(plan["transforms"]),
-                   "completed": [], "created": _now()}
+        journal: dict = {"schema_version": JOURNAL_SCHEMA, "txn": txn_id,
+                         "state": "prepared", "files": sorted(plan["transforms"]),
+                         "file_records": [], "completed": [], "created": _now()}
         self._write_journal(root, journal)
-        # Stage: full transformed copies + untouched copies of every other artifact,
-        # so the staged tree validates as a complete project.
+        # Stage complete transformed artifacts; persist recovery evidence
+        # (byte-exact backups + hashes) before any destructive operation.
+        records: list[dict] = []
         for p in discover_files(self.project):
             rel = p.resolve().relative_to(self.project.resolve()).as_posix()
-            dest = root / "staged" / rel
-            dest.parent.mkdir(parents=True, exist_ok=True)
-            dest.write_text(plan["transforms"].get(rel, p.read_text(encoding="utf-8")),
-                            encoding="utf-8")
+            staged = root / "staged" / rel
+            staged.parent.mkdir(parents=True, exist_ok=True)
+            staged.write_text(plan["transforms"].get(rel, p.read_text(encoding="utf-8")),
+                              encoding="utf-8")
+            _fsync_file(staged)
             backup = root / "backup" / rel
             backup.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(p, backup)
-        journal["state"] = "staged"; self._write_journal(root, journal)
+            _fsync_file(backup)
+            if rel in plan["transforms"]:
+                records.append({"path": rel, "backup_sha256": _sha(backup),
+                                "staged_sha256": _sha(staged)})
+        journal["file_records"] = sorted(records, key=lambda r: r["path"])
+        journal["state"] = "staged"
+        self._write_journal(root, journal)
         staged_graph = Graph.build(root / "staged")
-        diags = validate_graph(staged_graph)
+        diags = validate_all(staged_graph)
         if not is_valid(diags):
             journal["state"] = "failed"
-            journal["detail"] = "staged graph failed validation; activation refused"
+            journal["detail"] = ("staged project failed the activation gate "
+                                 "(graph + pending-task readiness); activation refused")
             self._write_journal(root, journal)
             return {"status": "refused", "txn": txn_id,
                     "detail": journal["detail"],
                     "diagnostics": [str(x) for x in diags if x.severity == "error"]}
-        # Activation: journaled, one file at a time, restore-on-any-failure.
+        # Activation: journal state first, then one fsynced journal advance
+        # per replacement. A crash between a replacement and its journal
+        # update is reconciled by recover() from the hashed manifest.
+        journal["state"] = "activating"
+        self._write_journal(root, journal)
         try:
             for i, rel in enumerate(journal["files"]):
                 if fail_after is not None and i >= fail_after:
                     raise OSError("injected failure during activation")
                 dest = self.project / rel
-                tmp = dest.with_suffix(dest.suffix + ".speckitext-tmp")
+                tmp = dest.with_name(dest.name + ".speckitext-tmp")
                 shutil.copyfile(root / "staged" / rel, tmp)
+                _fsync_file(tmp)
                 os.replace(tmp, dest)
-                journal["completed"].append(rel); self._write_journal(root, journal)
+                _fsync_dir(dest.parent)
+                if crash_after is not None and i + 1 >= crash_after:
+                    raise MigrationCrash(
+                        "simulated process interruption during activation")
+                journal["completed"].append(rel)
+                self._write_journal(root, journal)
         except OSError as exc:
             self._restore(root, journal)
-            journal["state"] = "failed"; journal["detail"] = f"activation failed, restored: {exc}"
+            journal["state"] = "failed"
+            journal["detail"] = f"activation failed, restored: {exc}"
             self._write_journal(root, journal)
             return {"status": "failed-restored", "txn": txn_id, "detail": journal["detail"]}
-        journal["state"] = "activated"; self._write_journal(root, journal)
+        journal["state"] = "activated"
+        self._write_journal(root, journal)
         return {"status": "activated", "txn": txn_id, "files": journal["files"]}
 
-    def rollback(self, txn_id: str | None = None) -> dict:
+    # ---- recovery ---------------------------------------------------------
+    def recover(self) -> dict:
+        """Restore every non-terminal transaction to its byte-exact originals.
+
+        Idempotent: terminal transactions are left alone, and running
+        recovery when nothing is incomplete is a no-op. Works from a fresh
+        process; reconciles replacements whose journal update never landed
+        by trusting file hashes, not the completed list.
+        """
+        base = self.project / STATE_DIR
+        if not base.is_dir():
+            return {"status": "nothing-to-recover",
+                    "detail": "no migration transactions found"}
+        recovered, blocked = [], []
+        for root in sorted(p for p in base.glob("*") if p.is_dir()):
+            journal_path = root / "journal.json"
+            try:
+                journal = json.loads(journal_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                blocked.append({"txn": root.name,
+                                "reason": f"journal unreadable ({exc}); restore "
+                                          "project files from backup/ manually, "
+                                          "then remove the transaction directory"})
+                continue
+            if journal.get("state") in TERMINAL_STATES:
+                continue
+            problem = self._verify_backups(root, journal)
+            if problem:
+                journal["state"] = "recovery-required"
+                journal["detail"] = problem
+                self._write_journal(root, journal)
+                blocked.append({"txn": journal.get("txn", root.name), "reason": problem})
+                continue
+            self._restore(root, journal)
+            bad = [r["path"] for r in journal.get("file_records", [])
+                   if not (self.project / r["path"]).is_file()
+                   or _sha(self.project / r["path"]) != r["backup_sha256"]]
+            if bad:
+                journal["state"] = "recovery-required"
+                journal["detail"] = f"restoration did not reproduce originals for: {bad}"
+                self._write_journal(root, journal)
+                blocked.append({"txn": journal.get("txn", root.name),
+                                "reason": journal["detail"]})
+                continue
+            journal["state"] = "recovered"
+            journal["detail"] = "interrupted migration restored to byte-exact originals"
+            self._write_journal(root, journal)
+            recovered.append(journal.get("txn", root.name))
+        if blocked:
+            return {"status": "recovery-required", "recovered": recovered,
+                    "blocked": blocked,
+                    "detail": "some transactions cannot be recovered automatically; "
+                              "no partially migrated state may be used"}
+        if recovered:
+            return {"status": "recovered", "recovered": recovered,
+                    "detail": "all incomplete migrations restored to originals"}
+        return {"status": "nothing-to-recover",
+                "detail": "no incomplete migration transactions"}
+
+    def _verify_backups(self, root: Path, journal: dict) -> str | None:
+        for record in journal.get("file_records", []):
+            backup = root / "backup" / record["path"]
+            if not backup.is_file():
+                return f"backup missing for {record['path']}; cannot recover safely"
+            if _sha(backup) != record.get("backup_sha256"):
+                return (f"backup for {record['path']} does not match its journal "
+                        "hash; cannot recover safely")
+        if not journal.get("file_records"):
+            for rel in journal.get("files", []):
+                if not (root / "backup" / rel).is_file():
+                    return f"backup missing for {rel}; cannot recover safely"
+        return None
+
+    # ---- rollback -----------------------------------------------------------
+    def rollback(self, txn_id: str | None = None, force: bool = False) -> dict:
         base = self.project / STATE_DIR
         if txn_id is None:
             candidates = sorted(p for p in base.glob("*") if p.is_dir()) if base.is_dir() else []
-            activated = [p for p in candidates
-                         if json.loads((p / "journal.json").read_text(encoding="utf-8")).get("state") == "activated"]
+            activated = []
+            for p in candidates:
+                try:
+                    state = json.loads((p / "journal.json").read_text(
+                        encoding="utf-8")).get("state")
+                except (OSError, ValueError):
+                    continue
+                if state == "activated":
+                    activated.append(p)
             if not activated:
                 return {"status": "nothing-to-rollback", "detail": "no activated transaction found"}
             root = activated[-1]
         else:
             root = base / txn_id
-        journal = json.loads((root / "journal.json").read_text(encoding="utf-8"))
+        try:
+            journal = json.loads((root / "journal.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            return {"status": "rollback-refused",
+                    "detail": f"cannot read transaction journal: {exc}"}
         if journal["state"] != "activated":
             return {"status": "nothing-to-rollback",
                     "detail": f"transaction {journal['txn']} is {journal['state']}, not activated"}
+        # Never silently overwrite work done after activation.
+        conflicts = []
+        for record in journal.get("file_records", []):
+            dest = self.project / record["path"]
+            current = _sha(dest) if dest.is_file() else None
+            if current != record.get("staged_sha256"):
+                conflicts.append({"path": record["path"],
+                                  "reason": "file changed after migration activation"})
+        if not journal.get("file_records"):
+            conflicts = []  # legacy journal without hashes: nothing to verify
+        if conflicts and not force:
+            return {"status": "rollback-conflict", "txn": journal["txn"],
+                    "conflicts": conflicts,
+                    "detail": "files were edited after activation; rollback would "
+                              "destroy those edits. Preserve or revert them "
+                              "explicitly, or re-run rollback with the explicit "
+                              "forced resolution."}
         self._restore(root, journal)
-        journal["state"] = "rolled-back"; self._write_journal(root, journal)
-        return {"status": "rolled-back", "txn": journal["txn"], "files": journal["files"]}
+        journal["state"] = "rolled-back"
+        self._write_journal(root, journal)
+        return {"status": "rolled-back", "txn": journal["txn"],
+                "files": journal["files"], "forced": bool(force and conflicts)}
 
     # ---- helpers ----------------------------------------------------------
     def _restore(self, root: Path, journal: dict) -> None:
@@ -167,29 +452,43 @@ class Migration:
             dest = self.project / rel
             if backup.is_file():
                 dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(backup, dest)
+                tmp = dest.with_name(dest.name + ".speckitext-tmp")
+                shutil.copyfile(backup, tmp)
+                os.replace(tmp, dest)
 
     @staticmethod
     def _write_journal(root: Path, journal: dict) -> None:
-        (root / "journal.json").write_text(json.dumps(journal, indent=2), encoding="utf-8")
+        journal["updated"] = _now()
+        tmp = root / "journal.json.tmp"
+        tmp.write_text(json.dumps(journal, indent=2, sort_keys=True), encoding="utf-8")
+        _fsync_file(tmp)
+        os.replace(tmp, root / "journal.json")
+        _fsync_dir(root)
 
 
 def transform_text(text: str, rel: str, existing_ids: list[str],
                    global_consts: list[str] | None = None) -> tuple[str, list[dict]]:
     """Add missing speckitext metadata using evidence in the text only.
 
-    Deterministic evidence rules (documented, never invented history):
+    Deterministic evidence rules (never invented history):
       * a heading/bullet/task ID gains an id/kind metadata block;
-      * a requirement gains governed_by from the project's GLOBAL constitution
-        rules (a constitution governs requirements by definition);
-      * a task gains satisfies from requirement IDs named in its own text and
-        verified_by from verification IDs named in its own text.
+      * ID-less headings in constitution/plan/data-model/research/contract
+        files gain deterministic IDs by file role and document order;
+      * a requirement gains governed_by from the project's GLOBAL
+        constitution rules (a constitution governs requirements by
+        definition);
+      * a task gains satisfies from requirement IDs named in its own text
+        and verified_by from verification IDs named in its own text.
     A task with no such evidence yields a finding, not an invented link.
     """
     findings: list[dict] = []
     global_consts = global_consts or []
     lines = text.replace("\r\n", "\n").split("\n")
     out: list[str] = []
+    base = Path(rel).name
+    role = _HEADING_ID_ROLES.get(base)
+    if role is None and "/contracts/" in f"/{rel}":
+        role = ("CTR", "contract")
 
     def has_meta_after(idx: int) -> bool:
         return idx + 1 < len(lines) and "<!-- speckitext" in lines[idx + 1]
@@ -198,7 +497,8 @@ def transform_text(text: str, rel: str, existing_ids: list[str],
         end = len(lines)
         for k in range(idx + 1, len(lines)):
             if re.match(r"^#{1,6}\s", lines[k]) or re.match(r"^\s*-\s*\[[ xX]\]\s", lines[k]):
-                end = k; break
+                end = k
+                break
         return end
 
     i = 0
@@ -209,8 +509,20 @@ def transform_text(text: str, rel: str, existing_ids: list[str],
         if heading and not has_meta_after(i):
             toks = ID_TOKEN_RE.findall(heading.group(2))
             if toks and kind_for_id(toks[0]):
-                out += ["<!-- speckitext", f"id: {toks[0]}",
-                        f"kind: {kind_for_id(toks[0])}", "-->"]
+                kind = kind_for_id(toks[0])
+                meta = ["<!-- speckitext", f"id: {toks[0]}", f"kind: {kind}"]
+                if kind == "constitution":
+                    meta.append("applicability: GLOBAL")
+                out += meta + ["-->"]
+            elif role is not None and len(heading.group(1)) >= 2:
+                prefix, kind = role
+                nid = _alloc_id(existing_ids, prefix)
+                meta = ["<!-- speckitext", f"id: {nid}", f"kind: {kind}"]
+                if kind == "constitution":
+                    meta.append("applicability: GLOBAL")
+                elif global_consts:
+                    meta.append(f"governed_by: {', '.join(global_consts)}")
+                out += meta + ["-->"]
         bullet = re.match(r"^\s*-\s*\*\*((?:FR|SC)-\d{3,})\*\*", line)
         if bullet and not has_meta_after(i) and global_consts:
             out += ["<!-- speckitext", f"id: {bullet.group(1)}",
@@ -234,7 +546,6 @@ def transform_text(text: str, rel: str, existing_ids: list[str],
                     out += meta
         i += 1
     new_text = "\n".join(out)
-    # Tasks without evidence-based links are findings, not fabrications.
     doc2 = parse_text(new_text, rel)
     for sec in doc2.sections:
         if sec.kind != "task":

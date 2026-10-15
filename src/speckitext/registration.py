@@ -1,17 +1,21 @@
 """Effective implementation-command registration detection.
 
-Inspects what an agent will actually load in a project — the registered
-skill/command files on disk — not the preset source. Classification:
+Inspects what an agent will actually load in a project -- the registered
+skill/command files on disk -- not the preset source. A body is verified
+SpeckitExt only when it carries the complete scoped-implementation
+contract: it validates (`speckitext validate`), checks registration
+(`speckitext doctor`), compiles scoped context (`speckitext compile`),
+expands only through the compiler (`speckitext expand`), and forbids
+broad whole-document loading. Merely mentioning `speckitext compile`
+(for example in an example or quotation) classifies as `partial`, never
+as verified. Any upstream broad-loading marker disqualifies a body.
 
-  speckitext  body invokes `speckitext compile` and forbids broad loading
-  upstream    body contains upstream's broad-loading outline markers
-  unknown     file exists but matches neither signature
-  missing     no speckit-implement registration found for that integration
-
+Classifications: speckitext | upstream | partial | unknown | missing,
+plus `conflict` when competing registrations coexist for one integration.
 Project-local skills shadow user-level skills of the same name in every
-supported agent; a project-local upstream speckit-implement therefore shadows
-SpeckitExt's global skill, which this module reports as a conflict, never as
-silent success.
+supported agent; a project-local upstream speckit-implement therefore
+shadows SpeckitExt's global skill, which this module reports as a
+conflict, never as silent success.
 """
 from __future__ import annotations
 
@@ -32,14 +36,30 @@ UPSTREAM_MARKERS = (
     "Read /memory/constitution.md for governance",
     "check-prerequisites",
 )
-SPECKITEXT_MARKERS = ("speckitext compile",)
+# The complete contract a verified SpeckitExt implement body must carry.
+REQUIRED_SPECKITEXT_MARKERS = (
+    "speckitext doctor",
+    "speckitext validate",
+    "speckitext compile",
+    "speckitext expand",
+)
+SCOPED_ONLY_MARKERS = (
+    "Load ONLY the compiled context package",
+    "Do NOT load the",
+    "never load whole",
+    "Never load whole",
+)
 
 
 def classify_implement_body(text: str) -> str:
-    if any(m in text for m in SPECKITEXT_MARKERS):
-        return "speckitext"
     if any(m in text for m in UPSTREAM_MARKERS):
         return "upstream"
+    has_required = all(m in text for m in REQUIRED_SPECKITEXT_MARKERS)
+    has_scoped = any(m in text for m in SCOPED_ONLY_MARKERS)
+    if has_required and has_scoped:
+        return "speckitext"
+    if "speckitext" in text:
+        return "partial"
     return "unknown"
 
 
@@ -61,23 +81,29 @@ def registration_status(project: Path) -> dict:
     project = Path(project)
     result: dict[str, dict] = {}
     override_dirs = project / ".specify" / "templates" / "overrides"
-    override_shadow = override_dirs.is_dir() and any(override_dirs.iterdir())
+    # Only an override that actually targets the implement template can
+    # shadow implementation; unrelated override files are not a conflict.
+    override_shadow = override_dirs.is_dir() and any(
+        "implement" in p.name.lower() for p in override_dirs.rglob("*") if p.is_file())
     for key, dirs in INTEGRATION_DIRS.items():
         entries: list[dict] = []
         for rel in dirs:
             for f in _implement_files(project, rel):
                 body = f.read_text(encoding="utf-8", errors="replace")
                 entries.append({"path": f.relative_to(project).as_posix(),
+                                "location": "project-local",
                                 "classification": classify_implement_body(body)})
         classifications = {e["classification"] for e in entries}
         if not entries:
             state, active = "missing", False
-        elif "speckitext" in classifications and "upstream" in classifications:
+        elif "speckitext" in classifications and len(classifications) > 1:
             state, active = "conflict", False
         elif classifications == {"speckitext"}:
             state, active = "speckitext", True
         elif classifications == {"upstream"}:
             state, active = "upstream", False
+        elif classifications == {"partial"}:
+            state, active = "partial", False
         else:
             state, active = "unknown", False
         result[key] = {"state": state, "override_active": active, "files": entries,
@@ -100,6 +126,10 @@ def _diagnostic(key: str, state: str) -> str:
         "missing": f"{key}: no speckit-implement registration found for this integration",
         "unknown": f"{key}: speckit-implement found but matches neither SpeckitExt nor "
                    "upstream signatures; inspect it manually before implementing",
-        "conflict": f"{key}: both SpeckitExt and upstream speckit-implement registrations "
-                    "exist; resolve the conflict before implementing",
+        "partial": f"{key}: speckit-implement mentions SpeckitExt but does not carry the "
+                   "complete scoped contract (doctor/validate/compile/expand plus "
+                   "no-broad-loading); it is NOT a verified SpeckitExt registration",
+        "conflict": f"{key}: competing speckit-implement registrations exist and at "
+                    "most one is verified SpeckitExt; resolve the conflict before "
+                    "implementing",
     }[state]

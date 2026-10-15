@@ -69,13 +69,53 @@ def _is_established(project: Path) -> str | None:
     return None
 
 
+def _preflight(project: Path, allow_existing: bool) -> dict | None:
+    """Non-destructive check run before any filesystem modification."""
+    if project.exists() and not project.is_dir():
+        return {"status": "refused", "detail": f"{project} exists and is not a directory"}
+    if not project.exists():
+        return None  # new target directory, created by bootstrap
+    if (project / ".specify").is_dir():
+        return None  # Spec Kit shaped; established checks apply separately
+    entries = [e for e in project.iterdir()]
+    if not entries:
+        return None  # existing empty directory
+    if all(e.name == ".git" for e in entries):
+        return None  # new, explicitly created empty Git repository
+    if allow_existing:
+        return None  # caller explicitly authorized this nonempty directory
+    return {"status": "refused",
+            "detail": "existing nonempty directory without .specify/ is not "
+                      "established as a new Spec Kit project; bootstrap refuses "
+                      "to initialize over existing work. Use a new/empty "
+                      "directory, or pass explicit authorization "
+                      "(--allow-existing) after review."}
+
+
 def bootstrap_project(project: Path, integrations: tuple[str, ...] = DEFAULT_INTEGRATIONS,
-                      preset_dir: str | None = None, extension_dir: str | None = None) -> dict:
+                      preset_dir: str | None = None, extension_dir: str | None = None,
+                      allow_existing: bool = False,
+                      allow_untested_specify: bool = False) -> dict:
     project = Path(project)
     unknown = [i for i in integrations if i not in INTEGRATION_DIRS]
     if unknown:
         raise ValueError(f"unknown integrations: {unknown}")
     steps: list[dict] = []
+    refused = _preflight(project, allow_existing)
+    if refused:
+        return refused
+    info = specify_info()
+    if info["classification"] == "unsupported":
+        return {"status": "refused",
+                "detail": f"specify {info['distribution_version']} is below the "
+                          "supported floor; bootstrap refused"}
+    if info["classification"] in ("untested", "unknown") and not allow_untested_specify:
+        return {"status": "refused",
+                "detail": f"specify version {info['distribution_version'] or 'unknown'} "
+                          f"is {info['classification']} (tested: "
+                          f"{', '.join(info['tested_versions'])}); read-only doctor "
+                          "diagnosis is permitted, but bootstrap/registration "
+                          "requires explicit confirmation (--allow-untested-specify)"}
     fresh = not (project / ".specify").is_dir()
     if not fresh:
         reason = _is_established(project)
@@ -88,9 +128,9 @@ def bootstrap_project(project: Path, integrations: tuple[str, ...] = DEFAULT_INT
     project.mkdir(parents=True, exist_ok=True)
     if fresh:
         r = _run(["specify", "init", ".", "--integration", integrations[0],
-                  "--non-interactive", "--force"], project)
-        steps.append({"step": "init", "ok": r.returncode == 0,
-                      "detail": (r.stdout + r.stderr).strip().splitlines()[-1:]})
+                  "--non-interactive"], project)
+        steps.append({"step": "init", "ok": r.returncode == 0, "returncode": r.returncode,
+                      "detail": (r.stdout + r.stderr).strip().splitlines()[-3:]})
         if r.returncode != 0:
             return {"status": "failed", "steps": steps,
                     "detail": "specify init failed; project left as-is"}
@@ -98,7 +138,13 @@ def bootstrap_project(project: Path, integrations: tuple[str, ...] = DEFAULT_INT
         r = _run(["specify", "integration", "install", key], project)
         if r.returncode != 0:
             r = _run(["specify", "integration", "install", key, "--force"], project)
-        steps.append({"step": f"integration install {key}", "ok": r.returncode == 0})
+        steps.append({"step": f"integration install {key}", "ok": r.returncode == 0,
+                      "returncode": r.returncode,
+                      "detail": (r.stdout + r.stderr).strip().splitlines()[-3:]})
+        if r.returncode != 0:
+            return {"status": "failed", "steps": steps,
+                    "detail": f"integration install {key} failed; bootstrap is "
+                              "incomplete and the project is not activated"}
     for label, args in (("preset add", ["specify", "preset", "add", "--dev", str(preset)]),
                         ("extension add", ["specify", "extension", "add", "--dev", str(extension)])):
         r = _run(args, project)
@@ -108,20 +154,33 @@ def bootstrap_project(project: Path, integrations: tuple[str, ...] = DEFAULT_INT
             return {"status": "failed", "steps": steps, "detail": f"{label} failed"}
     for key in integrations[1:]:
         r = _run(["specify", "integration", "use", key], project)
-        steps.append({"step": f"integration use {key} (re-register)", "ok": r.returncode == 0})
+        steps.append({"step": f"integration use {key} (re-register)",
+                      "ok": r.returncode == 0, "returncode": r.returncode,
+                      "detail": (r.stdout + r.stderr).strip().splitlines()[-3:]})
+        if r.returncode != 0:
+            return {"status": "failed", "steps": steps,
+                    "detail": f"integration use {key} failed; bootstrap is "
+                              "incomplete and the project is not activated"}
     r = _run(["specify", "integration", "use", integrations[0]], project)
-    steps.append({"step": f"restore default {integrations[0]}", "ok": r.returncode == 0})
+    steps.append({"step": f"restore default {integrations[0]}", "ok": r.returncode == 0,
+                  "returncode": r.returncode,
+                  "detail": (r.stdout + r.stderr).strip().splitlines()[-3:]})
+    if r.returncode != 0:
+        return {"status": "failed", "steps": steps,
+                "detail": "restoring the default integration failed; bootstrap "
+                          "is incomplete and the project is not activated"}
     registration = registration_status(project)
     requested = {k: v for k, v in registration["integrations"].items() if k in integrations}
     all_active = all(v["override_active"] for v in requested.values())
     metadata = {"speckitext": speckitext_info(), "specify": specify_info(),
                 "integrations": list(integrations),
                 "registration": requested,
+                "registration_complete": all_active,
                 "bootstrapped_at": datetime.now(timezone.utc).isoformat(),
                 "speckitext_package_version": __version__}
     (project / ".specify" / "speckitext.json").write_text(
         json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
-    return {"status": "bootstrapped" if all_active else "bootstrapped-with-warnings",
+    return {"status": "bootstrapped" if all_active else "partial",
             "steps": steps, "registration": requested,
             "metadata_file": ".specify/speckitext.json",
             "detail": "effective scoped speckit-implement verified for all requested "

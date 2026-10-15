@@ -127,3 +127,7 @@ partial or gradual mode, and scoped implementation stays gated on validation.
 - Constitution handling follows upstream: installing the preset never rewrites
   an authored `.specify/memory/constitution.md`; the structured template only
   seeds/composes at constitution-authoring time.
+
+## Corrective contracts (1.1.1)
+
+Freshness and compilation share `resolve_inclusion()` in `compiler.py`; do not duplicate graph-selection logic elsewhere. Expansion is compilation with approved non-task `extra_ids`, rendered once. Migration journal schema 2 records per-file backup/staged SHA-256 hashes and fsyncs journal advances; recovery reconciles by hash because a crash can land between replacement and journal update. Filesystem replacement is not multi-file atomic -- recoverable logical atomicity plus blocking partial state is the contract. Readiness applies to pending tasks only; done tasks are historical graph records.
