@@ -48,8 +48,9 @@ from pathlib import Path
 from .fingerprint import fingerprint_bytes
 from .graph import Graph
 from .identity import (IDENTITY_PATH, IDENTITY_VERSION, feature_from_path,
-                       generated_local_id, make_canonical, split_canonical)
-from .parsing import extract_task_local, parse_text
+                       generated_local_id, identity_map_diagnostics,
+                       load_identity_map, make_canonical, split_canonical)
+from .parsing import document_role, extract_task_local, is_task_bearing, parse_text
 from .project import discover_files
 from .schema import ID_TOKEN_RE, kind_for_id
 from .validate import is_valid, validate_all, validate_graph
@@ -207,7 +208,16 @@ class Migration:
                     global_consts.append(sec.node_id)
         global_consts = sorted(set(global_consts))
 
-        inventory, findings, transforms = [], [], {}
+        # Fail-closed identity preflight: a corrupt/inconsistent persisted
+        # mapping blocks activation before any authored file is touched.
+        findings: list[dict] = []
+        _existing_secs = []
+        for _rel, _text in texts.items():
+            _existing_secs.extend(parse_text(_text, _rel).sections)
+        for _diag in identity_map_diagnostics(load_identity_map(self.project), _existing_secs, self.project):
+            findings.append({"id": _diag.node_id, "path": _diag.path,
+                             "finding": f"identity map integrity ({_diag.code}): {_diag.message}"})
+        inventory, transforms = [], {}
         for p in files:
             rel = p.resolve().relative_to(self.project.resolve()).as_posix()
             text = texts[rel]
@@ -238,6 +248,10 @@ class Migration:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 dest.write_text(txt, encoding="utf-8")
             staged = Graph.build(root)
+        for diag in validate_graph(staged):
+            if diag.severity == "error":
+                findings.append({"id": diag.node_id, "path": diag.path,
+                                 "finding": f"staged graph validation ({diag.code}): {diag.message}"})
         for diag in validate_readiness(staged):
             findings.append({"id": diag.node_id, "path": diag.path,
                              "finding": f"pending task is not implementation-ready "
@@ -271,6 +285,9 @@ class Migration:
                 "duplicate_local_identifiers": sorted(
                     {s.local_id for s in tasks_o if [x.local_id for x in tasks_o].count(s.local_id) > 1}),
                 "canonical_tasks": [s.node_id for s in staged_doc.sections if s.kind == "task"],
+                "checklist_count": orig.checklist_occurrences,
+                "checklist_completed": orig.checklist_completed,
+                "checklist_pending": orig.checklist_pending,
             })
             total_occ += orig.task_occurrences
         for sec in sorted(staged.nodes.values(), key=lambda s: s.node_id):
@@ -762,6 +779,8 @@ def transform_text(text: str, rel: str, existing_ids: list[str],
     """
     findings: list[dict] = []
     global_consts = global_consts or []
+    if document_role(rel) == "checklist":
+        return text, findings
     lines = text.replace("\r\n", "\n").split("\n")
     out: list[str] = []
     base = Path(rel).name
@@ -800,8 +819,12 @@ def transform_text(text: str, rel: str, existing_ids: list[str],
         return meta
 
     i = 0
+    _in_checklist = False
     while i < len(lines):
         line = lines[i]
+        _hm = re.match(r"^(#{1,6})\s+(.*)$", line)
+        if _hm:
+            _in_checklist = "checklist" in _hm.group(2).lower()
         out.append(line)
         heading = re.match(r"^(#{1,6})\s+(.*)$", line)
         if heading and not has_meta_after(i):
@@ -825,7 +848,7 @@ def transform_text(text: str, rel: str, existing_ids: list[str],
             extra = [f"governed_by: {', '.join(global_consts)}"] if global_consts else []
             out += _meta_lines(bullet.group(1), kind_for_id(bullet.group(1)) or "requirement", extra)
         task = re.match(r"^\s*-\s*\[[ xX]\]\s+(.*)$", line)
-        if task and not has_meta_after(i):
+        if task and is_task_bearing(rel) and not _in_checklist and not has_meta_after(i):
             local, missing = extract_task_local(task.group(1), {})
             if missing:
                 local = generated_local_id(task.group(1), _taken)

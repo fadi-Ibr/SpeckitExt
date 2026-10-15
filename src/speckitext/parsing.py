@@ -32,6 +32,26 @@ _TASK_LEAD_RE = re.compile(
     r"(?P<plain>[A-Z][A-Za-z0-9_-]{1,40})(?=\s*[:\-–]\s|\s+))\s*:?\s*(?P<rest>.*)$")
 
 
+def document_role(rel_path: str) -> str:
+    """Document role determines checkbox meaning (not the checkbox alone).
+
+    ``tasks``: a ``tasks.md`` file -- checkboxes are implementation tasks.
+    ``checklist``: a file under a ``checklists/`` directory -- checkboxes are
+    quality-gate checklist items, never implementation tasks.
+    ``other``: any other artifact -- checkboxes are not implementation tasks.
+    """
+    parts = [p for p in str(rel_path).replace("\\", "/").split("/") if p]
+    if "checklists" in parts:
+        return "checklist"
+    if parts and parts[-1] == "tasks.md":
+        return "tasks"
+    return "other"
+
+
+def is_task_bearing(rel_path: str) -> bool:
+    return document_role(rel_path) == "tasks"
+
+
 def slugify(heading: str) -> str:
     slug = re.sub(r"[^a-z0-9]+", "-", heading.lower()).strip("-")
     return slug or "section"
@@ -120,7 +140,21 @@ class Document:
     sections: list[Section] = field(default_factory=list)
     duplicates: list[Section] = field(default_factory=list)
     raw: str = ""
-    task_occurrences: int = 0  # independent checkbox-line count
+    task_occurrences: int = 0  # implementation-task checkbox count (tasks.md only)
+    role: str = "other"
+    checklist_items: list[dict] = field(default_factory=list)
+
+    @property
+    def checklist_occurrences(self) -> int:
+        return len(self.checklist_items)
+
+    @property
+    def checklist_completed(self) -> int:
+        return sum(1 for i in self.checklist_items if i.get("status") == "done")
+
+    @property
+    def checklist_pending(self) -> int:
+        return sum(1 for i in self.checklist_items if i.get("status") != "done")
 
 
 def _ids_in(text: str) -> list[str]:
@@ -181,7 +215,23 @@ def extract_task_local(rest: str, meta: dict) -> tuple[str, bool]:
 def parse_text(text: str, rel_path: str, identity_map: dict | None = None) -> Document:
     lines = text.replace("\r\n", "\n").split("\n")
     doc = Document(path=rel_path, raw=text)
-    doc.task_occurrences = sum(1 for ln in lines if TASK_RE.match(ln))
+    doc.role = document_role(rel_path)
+    _in_checklist_heading = False
+    _checklist_flags: list[bool] = []
+    for _ln in lines:
+        _hm = HEADING_RE.match(_ln)
+        if _hm:
+            _in_checklist_heading = "checklist" in _hm.group(2).lower()
+        _checklist_flags.append(_in_checklist_heading)
+    def _is_task_line(idx: int) -> bool:
+        return bool(TASK_RE.match(lines[idx])) and doc.role == "tasks" and not _checklist_flags[idx]
+    def _is_checklist_line(idx: int) -> bool:
+        return bool(TASK_RE.match(lines[idx])) and not _is_task_line(idx)
+    doc.task_occurrences = sum(1 for _i in range(len(lines)) if _is_task_line(_i))
+    for _i, _ln in enumerate(lines):
+        _cm = TASK_RE.match(_ln)
+        if _cm and _is_checklist_line(_i):
+            doc.checklist_items.append({"text": _cm.group("rest").strip(), "status": "done" if _cm.group("mark").lower() == "x" else "pending", "line": _i + 1, "path": rel_path})
     heading_idx: list[tuple[int, int, str]] = []
     meta_blocks: list[tuple[int, int, dict]] = []
     i = 0
@@ -232,6 +282,8 @@ def parse_text(text: str, rel_path: str, identity_map: dict | None = None) -> Do
     taken_locals: dict[str, set[str]] = {}  # feature -> locals (for T-AUTO dedup)
 
     for idx, (start, level, heading) in enumerate(heading_idx):
+        if doc.role == "checklist":
+            continue
         end_s, end_e = section_range(idx)
         content = "\n".join(lines[start:end_e])
         meta = meta_for_heading(start)
@@ -258,6 +310,8 @@ def parse_text(text: str, rel_path: str, identity_map: dict | None = None) -> Do
         taken_locals.setdefault(feature, set()).add(local)
 
     for n, line in enumerate(lines):
+        if doc.role == 'checklist':
+            continue
         m = BULLET_ID_RE.match(line)
         if not m:
             continue
@@ -289,6 +343,8 @@ def parse_text(text: str, rel_path: str, identity_map: dict | None = None) -> Do
         taken_locals.setdefault(feature, set()).add(local)
 
     for n, line in enumerate(lines):
+        if not _is_task_line(n):
+            continue
         m = TASK_RE.match(line)
         if not m:
             continue

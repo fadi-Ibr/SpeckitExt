@@ -22,6 +22,8 @@ import json
 import re
 from pathlib import Path
 
+from .schema import Diagnostic
+
 IDENTITY_VERSION = 1
 IDENTITY_PATH = ".speckitext/identity.json"
 SEPARATOR = "::"
@@ -100,6 +102,10 @@ def load_identity_map(project: Path) -> dict:
     data.setdefault("version", IDENTITY_VERSION)
     data.setdefault("features", {})
     data.setdefault("entities", [])
+    if not isinstance(data.get("features"), dict) or not isinstance(data.get("entities"), list):
+        return {"version": data.get("version", IDENTITY_VERSION), "features": {},
+                "entities": [], "corrupt": True,
+                "corrupt_reason": "identity map 'features' must be an object and 'entities' a list"}
     return data
 
 
@@ -195,3 +201,140 @@ class IdentityResolver:
             return None, str(exc)
         except UnknownReferenceError as exc:
             return None, str(exc)
+
+
+def identity_map_diagnostics(identity_map, sections=(), project=None) -> list:
+    """Fail-closed integrity checks for the persisted identity map.
+
+    No map (file absent) is valid for a fresh project. A present map must be
+    well-typed, version-supported, internally consistent, and in agreement
+    with authored canonical metadata for entities present in both. Source
+    line/path differences alone are not inconsistencies (relocation)."""
+    diags: list = []
+    def add(code, msg, nid=""):
+        diags.append(Diagnostic(code, msg, nid, IDENTITY_PATH))
+    if project is not None and not (Path(project) / IDENTITY_PATH).is_file():
+        return []
+    if identity_map is None:
+        return []
+    if not isinstance(identity_map, dict):
+        add("IDENTITY_MAP_INVALID", "identity map must be a JSON object")
+        return diags
+    if identity_map.get("corrupt"):
+        add("IDENTITY_MAP_CORRUPT",
+            f"identity map is corrupt and cannot be trusted: {identity_map.get('corrupt_reason', 'invalid JSON or structure')}; "
+            "original mapping preserved for inspection/recovery; fix or remove it explicitly, identities will not be silently rebuilt")
+        return diags
+    # A default empty map from a missing file is valid (checked via project above);
+    # when called without project, an entirely empty map is treated as no map.
+    if project is None and not identity_map.get("features") and not identity_map.get("entities") and "version" not in identity_map:
+        return []
+    version = identity_map.get("version")
+    if version != IDENTITY_VERSION:
+        add("IDENTITY_MAP_UNSUPPORTED_VERSION",
+            f"unsupported identity map version {version!r} (expected {IDENTITY_VERSION}); refusing to trust persisted identities")
+    features = identity_map.get("features")
+    if not isinstance(features, dict):
+        add("IDENTITY_MAP_INVALID", "identity map 'features' must be an object mapping directory feature to stable feature")
+        features = {}
+    entities = identity_map.get("entities")
+    if not isinstance(entities, list):
+        add("IDENTITY_MAP_INVALID", "identity map 'entities' must be a list")
+        entities = []
+    for k, v in list(features.items()):
+        if not isinstance(k, str) or not isinstance(v, str) or not v or sanitize_feature(v) != v or sanitize_feature(k) != k:
+            add("IDENTITY_MAP_INVALID", f"invalid feature mapping {k!r}: {v!r}; keys and values must be stable feature identifiers")
+    seen_canon: dict = {}
+    seen_fl: dict = {}
+    seen_alias: dict = {}
+    valid_entities = []
+    for e in entities:
+        if not isinstance(e, dict):
+            add("IDENTITY_MAP_INVALID", "identity map entity records must be objects")
+            continue
+        canon, local, feat, kind, alias = e.get("canonical_id"), e.get("local_id"), e.get("feature"), e.get("kind"), e.get("legacy_alias", "")
+        if not all(isinstance(x, str) for x in (canon, local, feat, kind)) or not isinstance(alias, str) or not canon or not local or not kind:
+            add("IDENTITY_MAP_INVALID", f"identity map entity has missing or non-string canonical_id/local_id/feature/kind: {e!r}")
+            continue
+        valid_entities.append(e)
+        if canon in seen_canon:
+            add("IDENTITY_MAP_DUPLICATE", f"duplicate canonical identity {canon!r} in identity map", canon)
+        seen_canon[canon] = e
+        cf, cl = split_canonical(canon)
+        if cl != local:
+            add("IDENTITY_MAP_INCONSISTENT", f"canonical identity {canon!r} local part {cl!r} does not match local_id {local!r}", canon)
+        if kind == "constitution" or is_global_feature(feat):
+            if cf and not is_global_feature(cf):
+                add("IDENTITY_MAP_INCONSISTENT", f"global entity {canon!r} must use the plain global namespace, not {cf!r}", canon)
+        else:
+            if cf != sanitize_feature(feat):
+                add("IDENTITY_MAP_INCONSISTENT", f"canonical namespace {cf!r} does not match feature {feat!r} for {canon!r}", canon)
+        key_fl = (feat, local)
+        if key_fl in seen_fl and seen_fl[key_fl] != canon:
+            add("IDENTITY_MAP_INCONSISTENT", f"feature {feat!r} local {local!r} is claimed by conflicting canonical identities {seen_fl[key_fl]!r} and {canon!r}", canon)
+        seen_fl[key_fl] = canon
+        if alias:
+            key_a = (feat, alias)
+            if key_a in seen_alias and seen_alias[key_a] != canon:
+                add("IDENTITY_MAP_INCONSISTENT", f"legacy alias {alias!r} in feature {feat!r} conflicts between {seen_alias[key_a]!r} and {canon!r}", canon)
+            seen_alias[key_a] = canon
+        sp = e.get("source_path")
+        if isinstance(sp, str) and sp:
+            dirf = feature_from_path(sp)
+            if dirf and not is_global_feature(feat):
+                mapped = features.get(dirf) if isinstance(features, dict) else None
+                if mapped is not None:
+                    if sanitize_feature(str(mapped)) != feat:
+                        add("IDENTITY_MAP_INCONSISTENT", f"entity {canon!r} feature {feat!r} disagrees with feature mapping {dirf!r} -> {mapped!r}", canon)
+                elif dirf != feat:
+                    add("IDENTITY_MAP_INCONSISTENT", f"entity {canon!r} source {sp!r} is in feature directory {dirf!r} but declares feature {feat!r} with no explaining feature mapping", canon)
+    # Persisted vs authored agreement for overlapping canonicals.
+    secs = list(sections or ())
+    by_canon = {getattr(s, "node_id", ""): s for s in secs}
+    for e in valid_entities:
+        s = by_canon.get(e["canonical_id"])
+        if s is None:
+            continue
+        if getattr(s, "local_id", "") != e["local_id"] or getattr(s, "feature_id", "") != e["feature"] or getattr(s, "kind", "") != e["kind"]:
+            add("IDENTITY_MAP_INCONSISTENT", f"persisted identity {e['canonical_id']!r} (local={e['local_id']!r}, feature={e['feature']!r}, kind={e['kind']!r}) disagrees with authored metadata (local={getattr(s, 'local_id', '')!r}, feature={getattr(s, 'feature_id', '')!r}, kind={getattr(s, 'kind', '')!r})", e["canonical_id"])
+        elif e.get("legacy_alias", "") != getattr(s, "legacy_alias", "") and not (e.get("legacy_alias", "") == "" and getattr(s, "id_missing", False)):
+            # Authored alias for an ID-less (T-AUTO) entity is empty; otherwise alias must be preserved exactly.
+            if not getattr(s, "id_missing", False):
+                add("IDENTITY_MAP_INCONSISTENT", f"persisted legacy alias {e.get('legacy_alias')!r} for {e['canonical_id']!r} disagrees with authored alias {getattr(s, 'legacy_alias', '')!r}", e["canonical_id"])
+    return sorted(diags, key=lambda x: (x.code, x.node_id, x.path))
+
+
+def section_identity_diagnostics(sec, identity_map=None) -> list:
+    """Single canonical-ownership invariant for one authored section."""
+    diags: list = []
+    meta = getattr(sec, "meta", {}) or {}
+    canonical = getattr(sec, "node_id", "") or ""
+    kind = getattr(sec, "kind", "") or ""
+    local = getattr(sec, "local_id", "") or split_canonical(canonical)[1]
+    cf, cl = split_canonical(canonical)
+    def add(code, msg):
+        diags.append(Diagnostic(code, msg, canonical, getattr(sec, "path", "")))
+    dirf = feature_from_path(getattr(sec, "path", "") or "")
+    mapped = ""
+    if isinstance(identity_map, dict) and isinstance(identity_map.get("features"), dict):
+        mv = identity_map["features"].get(dirf)
+        if mv:
+            mapped = sanitize_feature(str(mv))
+    declared = sanitize_feature(str(meta.get("feature", "")).strip()) if str(meta.get("feature", "")).strip() else ""
+    if mapped and declared and mapped != declared:
+        add("CANONICAL_FEATURE_MISMATCH", f"feature metadata {declared!r} contradicts persisted feature mapping {dirf!r} -> {mapped!r}")
+    effective = mapped or declared or dirf
+    if kind == "constitution" or is_global_feature(effective) or not effective:
+        if cf and not is_global_feature(cf):
+            add("INVALID_GLOBAL_NAMESPACE", f"global/shared entity {canonical!r} must use the plain global namespace (e.g. CON-001), not feature namespace {cf!r}")
+    else:
+        if not cf:
+            add("CANONICAL_FEATURE_MISMATCH", f"feature-local entity {local!r} in feature {effective!r} must use canonical namespace {effective!r} (expected {effective}::{local})")
+        elif cf != effective:
+            add("CANONICAL_FEATURE_MISMATCH", f"canonical namespace {cf!r} contradicts feature ownership {effective!r} (directory {dirf!r}); preserve a matching identity mapping/feature metadata for a legitimate relocation")
+    if cl != local:
+        add("CANONICAL_LOCAL_MISMATCH", f"canonical local {cl!r} does not match local ID {local!r}")
+    meta_local = str(meta.get("local_id", "")).strip() if meta.get("local_id") else ""
+    if meta_local and meta_local != local:
+        add("CANONICAL_LOCAL_MISMATCH", f"local_id metadata {meta_local!r} does not match local ID {local!r}")
+    return diags

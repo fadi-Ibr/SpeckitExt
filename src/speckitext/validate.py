@@ -1,13 +1,22 @@
 """Graph validation. A graph with any error diagnostic is not implementation-ready."""
 from __future__ import annotations
 
-from .governance import unresolved_conditions
+from .governance import governance_diagnostics, unresolved_conditions
+from .identity import identity_map_diagnostics, section_identity_diagnostics
 from .graph import Graph
 from .schema import (APPLICABILITIES, RELATION_RULES, Diagnostic, kind_for_id, valid_id)
 
 
 def validate_graph(graph: Graph) -> list[Diagnostic]:
     d: list[Diagnostic] = []
+    # Identity-map integrity is fail-closed: a corrupt/inconsistent persisted
+    # mapping invalidates the graph for every implementation operation.
+    d.extend(identity_map_diagnostics(getattr(graph, "identity_map", {}) or {},
+                                      list(graph.nodes.values()),
+                                      getattr(graph, "project", None)))
+    for sec in graph.nodes.values():
+        d.extend(section_identity_diagnostics(sec, getattr(graph, "identity_map", None)))
+    d.extend(governance_diagnostics(graph))
     for sec in graph.duplicates:
         # Same canonical = duplicate canonical; same feature+local with a
         # different canonical = conflicting legacy alias in one feature.

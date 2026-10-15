@@ -197,6 +197,10 @@ def cmd_impact(args) -> int:
     if blocked is not None:
         return blocked
     graph = _graph(args)
+    _diags = validate_all(graph)
+    if not is_valid(_diags):
+        print("error: graph not implementation-ready (identities cannot be trusted); run `speckitext validate` for diagnostics", file=sys.stderr)
+        return 1
     if args.files:
         result = impact_for_files(graph, Path(args.project),
                                   [x.strip() for x in args.files.split(",") if x.strip()])

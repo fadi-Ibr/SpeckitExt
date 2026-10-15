@@ -53,6 +53,12 @@ Worked example: [examples/](examples/README.md).
   persists `.speckitext/identity.json` inside the same staged/backup/
   rollback transaction. See docs/compatibility.md.
 
+## Corrective repairs in 1.2.0 -- multi-feature compatibility
+
+- Checklist checkboxes in specs/*/checklists/*.md are quality-gate items, never implementation tasks: only tasks.md checkboxes receive task identity, readiness, batching, and migration coverage.
+- Scoped governance matches canonical <feature>::COMP-... identity exactly; bare local scopes that are ambiguous across features are diagnosed instead of leaking between features.
+- A corrupt, unsupported, or internally inconsistent .speckitext/identity.json now fails validation closed (compile, batch, impact, expansion, and migration activation refuse; the map is preserved), and canonical namespaces must agree with declared feature ownership -- legitimate renames stay possible when the preserved canonical identity and identity mapping agree. Schema remains 2.0; identity map remains version 1.
+
 ## What's new in 1.1.0
 
 - **Implementation-readiness gate**: tasks must carry `Objective:`/`Scope:`/

@@ -68,11 +68,13 @@ class Graph:
         self.resolver: IdentityResolver | None = None
         self.resolution_errors: list[dict] = []  # {source, relation, raw, error}
         self.identity_map: dict = {}
+        self.project = None
 
     @classmethod
     def build(cls, project: Path) -> "Graph":
         g = cls()
         project = Path(project)
+        g.project = project
         g.identity_map = load_identity_map(project)
         all_secs: list[Section] = []
         for path in discover_files(project):

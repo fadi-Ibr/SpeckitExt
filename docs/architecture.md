@@ -158,3 +158,50 @@ partial or gradual mode, and scoped implementation stays gated on validation.
 ## Corrective contracts (1.1.1)
 
 Freshness and compilation share `resolve_inclusion()` in `compiler.py`; do not duplicate graph-selection logic elsewhere. Expansion is compilation with approved non-task `extra_ids`, rendered once. Migration journal schema 2 records per-file backup/staged SHA-256 hashes and fsyncs journal advances; recovery reconciles by hash because a crash can land between replacement and journal update. Filesystem replacement is not multi-file atomic -- recoverable logical atomicity plus blocking partial state is the contract. Readiness applies to pending tasks only; done tasks are historical graph records.
+
+## Multi-feature corrective contracts (1.2.0)
+
+- **Document-role-aware task discovery** (`parsing.document_role`): only a
+  `tasks.md` file (outside any `checklists/` directory and outside a
+  `Checklist` heading inside it) is task-bearing. Checkboxes in
+  `specs/*/checklists/*.md` are quality-gate checklist items: they are
+  recorded on the parsed `Document` (`checklist_items`, completed/pending
+  counts) and kept outside the implementation graph by design, so they never
+  receive canonical task identity, readiness, batching, or migration
+  `T-AUTO` IDs. Checklist files are never rewritten by migration, and the
+  `speckit.implement` checklist preflight (read-only gate in
+  `preset/commands/speckit.implement.md`) is unchanged.
+- **Canonical governance matching** (`governance.py`): SCOPED scope entries
+  that are qualified (`<feature>::COMP-001`) match exactly that canonical
+  component. Bare local entries resolve only when unambiguous in the
+  applicable context (one candidate overall, one in the rule's feature, or
+  one among the selected components); repeated local IDs across features
+  yield an `AMBIGUOUS_SCOPE` error, a qualified missing target yields an
+  `UNRESOLVED_SCOPE` error, and a bare missing target yields an
+  `UNRESOLVED_SCOPE` warning. Compilation, freshness, expansion, and batch
+  compilation all share this path through `resolve_inclusion`, so a newly
+  applicable rule invalidates an older package. GLOBAL rules apply everywhere.
+- **Identity-map integrity** (`identity.identity_map_diagnostics`): no map
+  is valid for a fresh project; a present map must be valid JSON, a JSON
+  object, version 1, with well-typed `features`/`entities`, unique canonical
+  IDs, no conflicting feature+local or legacy-alias claims, canonical/feature/
+  local agreement, and agreement with authored metadata for overlapping
+  entities. Violations (`IDENTITY_MAP_CORRUPT`,
+  `IDENTITY_MAP_UNSUPPORTED_VERSION`, `IDENTITY_MAP_INVALID`,
+  `IDENTITY_MAP_DUPLICATE`, `IDENTITY_MAP_INCONSISTENT`) are errors in graph
+  validation and therefore refuse compile, batch, impact, expansion, and
+  migration activation; the original map file is preserved. Source line or
+  path changes alone are not inconsistencies.
+- **Canonical ownership** (`identity.section_identity_diagnostics`, the single
+  implementation used by validation): a feature-local canonical namespace
+  must equal the effective stable feature (persisted feature mapping first,
+  then declared `feature:`, then the `specs/<dir>` directory), its local part
+  must equal the local ID, and global/shared entities must use the plain
+  namespace. A directory rename is legitimate when the preserved canonical
+  identity and the identity mapping (or declared feature metadata) agree;
+  a rename with neither is diagnosed (`CANONICAL_FEATURE_MISMATCH`), as are
+  local mismatches (`CANONICAL_LOCAL_MISMATCH`) and feature-qualified global
+  IDs (`INVALID_GLOBAL_NAMESPACE`). Duplicate local IDs across features
+  remain valid. No schema or identity-format version change was required:
+  schema stays 2.0 and the identity map stays version 1; only validation
+  became fail-closed.
